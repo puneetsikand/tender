@@ -8,7 +8,7 @@ Read [`docs/PLAN.md`](docs/PLAN.md) before changing code.
 ```
 swift build && swift test        # engine + tests
 swift run PhotoFerry             # the app (dev)
-swift run pf version             # the CLI
+swift run pf version             # the CLI (also: volumes, watch, cameras, scan <path>, probe <mount>)
 scripts/package.sh               # dist/PhotoFerry.app
 ```
 
@@ -16,11 +16,13 @@ scripts/package.sh               # dist/PhotoFerry.app
 - `Sources/PhotoFerryCore`: the engine. **No SwiftUI/AppKit imports, no `@MainActor` in public API.**
 - `Sources/IngestUI`: SwiftUI views for ingest, embeddable by a future browser app.
 - `Sources/PhotoFerry`: thin app shell. `Sources/pf`: CLI front end to the engine.
-- `Tests/PhotoFerryCoreTests`: Swift Testing (`@Test`/`#expect`), not XCTest.
+- `Tests/PhotoFerryCoreTests`: Swift Testing (`@Test`/`#expect`), not XCTest. `VolumeMonitorTests` mounts a
+  throwaway exFAT disk image with `hdiutil` (no sudo needed, about 2 s).
 - `Packaging/`: Info.plist template (`__VERSION__` is substituted). `VERSION` holds the version.
 
 ## Rules
-- Swift 6 language mode, macOS 26+. Modern APIs only: structured concurrency (no GCD/OperationQueue),
+- Swift 6 language mode, macOS 26+. Modern APIs only: structured concurrency (no GCD/OperationQueue, except
+  where an Apple API requires a queue, like DiskArbitration in `VolumeMonitor.swift`, kept private to that file),
   Observation, swift-system for file I/O, CryptoKit SHA-256.
 - No Xcode project: SwiftPM + `scripts/package.sh`. Any XPC service (M2) is bundled by the script.
 - Never write anything to a source card except an explicitly confirmed delete (PLAN §7, §3.2).
