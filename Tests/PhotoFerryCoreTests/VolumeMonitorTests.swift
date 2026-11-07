@@ -49,4 +49,26 @@ import Testing
         }
         #expect(unmounted)
     }
+
+    @Test(.timeLimit(.minutes(1)))
+    func ejectUnmountsTheVolume() async throws {
+        let label = "PFEJ\(Int.random(in: 1000...9999))"
+        let dmg = FileManager.default.temporaryDirectory.appendingPathComponent("\(label).dmg")
+        defer { try? FileManager.default.removeItem(at: dmg) }
+        try Self.hdiutil("create", "-quiet", "-size", "8m", "-fs", "ExFAT", "-volname", label, dmg.path)
+        var events = VolumeMonitor.events().makeAsyncIterator()
+        try Self.hdiutil("attach", "-quiet", "-nobrowse", dmg.path)
+        var mounted: VolumeInfo?
+        while mounted == nil, let e = await events.next() {
+            if case .mounted(let v) = e, v.name == label { mounted = v }
+        }
+        let v = try #require(mounted)
+        try await VolumeMonitor.eject(mountPoint: try #require(v.mountPoint))
+        var gone = false
+        while !gone, let e = await events.next() {
+            if case .unmounted(let id) = e, id == v.id { gone = true }
+        }
+        #expect(gone)
+        #expect(!FileManager.default.fileExists(atPath: v.mountPoint!.path))
+    }
 }

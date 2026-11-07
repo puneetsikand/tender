@@ -24,5 +24,6 @@ let package = Package(
         // Bundled by scripts/package.sh as Contents/XPCServices/local.photoferry.copyservice.xpc.
         .executableTarget(name: "PhotoFerryCopyService", dependencies: ["PhotoFerryCore"]),
         .testTarget(name: "PhotoFerryCoreTests", dependencies: ["PhotoFerryCore"]),
+        .testTarget(name: "IngestUITests", dependencies: ["IngestUI", "PhotoFerryCore"]),
     ]
 )

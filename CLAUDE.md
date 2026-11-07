@@ -14,7 +14,10 @@ scripts/package.sh               # dist/PhotoFerry.app
 
 ## Layout
 - `Sources/PhotoFerryCore`: the engine. **No SwiftUI/AppKit imports, no `@MainActor` in public API.**
-- `Sources/IngestUI`: SwiftUI views for ingest, embeddable by a future browser app.
+- `Sources/IngestUI`: SwiftUI views + `@Observable @MainActor` models (`DeviceStore`, `CardSession`, `JobProgress`,
+  `WorkflowLibrary`, `HistoryStore`) for ingest, embeddable by a future browser app. Check UI changes with
+  `PF_WORKFLOWS=<scratch> PF_LEDGER=<scratch> .build/debug/PhotoFerry --snapshot <scratch>/snap` (needs a card inserted;
+  renders card/progress/done/history PNGs offscreen; window chrome isn't rendered).
 - `Sources/PhotoFerry`: thin app shell. `Sources/pf`: CLI front end to the engine.
 - `Sources/PhotoFerryCopyService`: the XPC copy service, bundled by `package.sh`. Hosts reach the engine only through
   `CopyRunner` (`CopyRunners.preferred()`): XPC inside the app bundle, in-process otherwise. Test the XPC path with

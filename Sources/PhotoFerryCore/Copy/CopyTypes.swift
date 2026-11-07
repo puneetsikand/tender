@@ -106,6 +106,8 @@ public struct FileCopyResult: Sendable, Hashable, Codable {
 public enum CopyEvent: Sendable, Codable {
     case fileStarted(index: Int, SourceFile)
     case progress(index: Int, bytesDone: Int64)
+    /// All bytes are written; the copies are being verified.
+    case verifying(index: Int)
     case fileFinished(index: Int, FileCopyResult)
     case finished(CopySummary)
     /// The runner lost the job before `.finished`, e.g. the copy service connection dropped.

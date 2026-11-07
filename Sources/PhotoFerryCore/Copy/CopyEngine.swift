@@ -97,6 +97,7 @@ public struct CopyEngine: Sendable {
             return sourceFailure("read: \(error.localizedDescription)", writers: writers)
         }
 
+        out.yield(.verifying(index: index))
         let sealed = writers.filter { $0.seal(fullSync: options.fullSync) }
         sealed.forEach { afterSeal?($0.partialURL) }
 

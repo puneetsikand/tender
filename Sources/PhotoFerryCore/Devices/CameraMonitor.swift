@@ -59,7 +59,14 @@ private final class CameraBrowser: NSObject, ICDeviceBrowserDelegate {
         retainSelf = nil
     }
 
+    nonisolated static func isMassStorage(_ device: ICDevice) -> Bool {
+        device.transportType == ICDeviceTransport.transportTypeMassStorage.rawValue
+    }
+
     nonisolated func deviceBrowser(_ browser: ICDeviceBrowser, didAdd device: ICDevice, moreComing: Bool) {
+        // ImageCaptureCore also lists mounted DCIM volumes (card readers, mass-storage cameras)
+        // as cameras. Those are handled as volumes by VolumeMonitor, so skip them here.
+        guard !Self.isMassStorage(device) else { return }
         let info = CameraInfo(
             id: device.uuidString ?? device.name ?? "camera",
             name: device.name,
@@ -73,6 +80,7 @@ private final class CameraBrowser: NSObject, ICDeviceBrowserDelegate {
     }
 
     nonisolated func deviceBrowser(_ browser: ICDeviceBrowser, didRemove device: ICDevice, moreGoing: Bool) {
+        guard !Self.isMassStorage(device) else { return }
         let id = device.uuidString ?? device.name ?? "camera"
         continuation.yield(.disconnected(id: id))
     }
