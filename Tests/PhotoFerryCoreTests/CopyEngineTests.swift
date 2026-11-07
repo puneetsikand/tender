@@ -137,3 +137,104 @@ import Testing
         #expect(partials(under: tmp).isEmpty)
     }
 }
+
+/// Fault injection: every verification mode must catch the faults it claims to catch (PLAN §11).
+@Suite struct VerificationTests {
+    let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("pf-verify-\(UUID().uuidString)")
+
+    func source(bytes: Int = 3 * (1 << 20) + 17) throws -> SourceFile {
+        let url = tmp.appendingPathComponent("src/DCIM/100TEST/IMG_0001.CR3")
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data((0..<bytes).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7) }).write(to: url)
+        return SourceFile(url: url, relativePath: "DCIM/100TEST/IMG_0001.CR3", size: Int64(bytes), modificationDate: nil, kind: .raw)
+    }
+
+    func run(_ engine: CopyEngine, _ file: SourceFile, roots: [String]) async throws -> FileCopyResult {
+        let request = CopyRequest(source: file, destinations: roots.map { tmp.appendingPathComponent("\($0)/\(file.fileName)") })
+        for await event in engine.run([request]) {
+            if case .finished(let s) = event { return try #require(s.results.first) }
+        }
+        throw CancellationError()
+    }
+
+    /// Flips one byte in the middle of the file.
+    static func flipByte(_ url: URL) {
+        guard let h = try? FileHandle(forUpdating: url), let size = try? h.seekToEnd(), size > 0 else { return }
+        try? h.seek(toOffset: size / 2)
+        let b = (try? h.read(upToCount: 1))?.first ?? 0
+        try? h.seek(toOffset: size / 2)
+        try? h.write(contentsOf: Data([b ^ 0xFF]))
+        try? h.close()
+    }
+
+    static func truncate(_ url: URL) {
+        guard let h = try? FileHandle(forUpdating: url) else { return }
+        try? h.truncate(atOffset: 1000)
+        try? h.close()
+    }
+
+    func assertNoTraces(_ root: String, _ file: SourceFile) {
+        let dir = tmp.appendingPathComponent(root)
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent(file.fileName).path))
+        let left = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        #expect(left.isEmpty, "left behind: \(left)")
+    }
+
+    @Test(arguments: [VerifyMode.hash, .paranoid, .bytes])
+    func corruptedCopyIsCaughtAndNeverGetsItsFinalName(mode: VerifyMode) async throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let file = try source()
+        let bad = tmp.appendingPathComponent("A").path
+        let engine = CopyEngine(options: CopyOptions(chunkSize: 1 << 20, verify: mode),
+                                afterSeal: { url in if url.path.hasPrefix(bad) { Self.flipByte(url) } },
+                                beforeSourceReread: nil)
+        let result = try await run(engine, file, roots: ["A", "B"])
+        guard case .failed(_, let reason) = result.destinations[0] else { Issue.record("corruption not caught in \(mode)"); return }
+        #expect(reason.hasPrefix("verification failed"))
+        #expect(result.destinations[1].isWritten)          // the good copy still lands
+        assertNoTraces("A", file)
+    }
+
+    @Test(arguments: [VerifyMode.size, .hash, .paranoid, .bytes])
+    func truncatedCopyIsCaughtByEveryMode(mode: VerifyMode) async throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let file = try source()
+        let engine = CopyEngine(options: CopyOptions(chunkSize: 1 << 20, verify: mode),
+                                afterSeal: { Self.truncate($0) }, beforeSourceReread: nil)
+        let result = try await run(engine, file, roots: ["A"])
+        #expect(!result.succeeded)
+        assertNoTraces("A", file)
+    }
+
+    @Test func sizeModeDoesNotClaimToCatchCorruption() async throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let file = try source()
+        let engine = CopyEngine(options: CopyOptions(chunkSize: 1 << 20, verify: .size),
+                                afterSeal: { Self.flipByte($0) }, beforeSourceReread: nil)
+        let result = try await run(engine, file, roots: ["A"])
+        guard case .written(_, let v) = result.destinations[0] else { Issue.record("expected written"); return }
+        #expect(v.mode == .size && v.path == .notRead)   // honestly labelled as unread
+    }
+
+    @Test func paranoidCatchesASourceThatReadsDifferentlyTheSecondTime() async throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let file = try source()
+        let engine = CopyEngine(options: CopyOptions(chunkSize: 1 << 20, verify: .paranoid),
+                                afterSeal: nil, beforeSourceReread: { Self.flipByte($0) })
+        let result = try await run(engine, file, roots: ["A", "B"])
+        #expect(result.sourceError?.hasPrefix("source read unstable") == true)
+        #expect(result.destinations.allSatisfy { !$0.isWritten })
+        assertNoTraces("A", file)
+        assertNoTraces("B", file)
+    }
+
+    @Test func hashModeOnLocalDiskVerifiesFromTheDevice() async throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let file = try source()
+        let result = try await run(CopyEngine(options: CopyOptions(chunkSize: 1 << 20)), file, roots: ["A"])
+        guard case .written(_, let v) = result.destinations[0] else { Issue.record("expected written"); return }
+        #expect(v.mode == .hash)
+        #expect(v.path == .device)
+        #expect(v.destinationSHA256 == result.sourceSHA256)
+    }
+}

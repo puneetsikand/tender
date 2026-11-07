@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>PhotoFerryCopyService</string>
+    <key>CFBundleIdentifier</key><string>local.photoferry.copyservice</string>
+    <key>CFBundleExecutable</key><string>PhotoFerryCopyService</string>
+    <key>CFBundlePackageType</key><string>XPC!</string>
+    <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+    <key>CFBundleVersion</key><string>__VERSION__</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>LSMinimumSystemVersion</key><string>26.0</string>
+    <key>XPCService</key>
+    <dict>
+        <key>ServiceType</key><string>Application</string>
+    </dict>
+    <!-- The service reads cards and writes to shares itself, so it needs the same TCC strings. -->
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>PhotoFerry reads photos and videos from memory cards so it can copy them to your folders.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>PhotoFerry copies photos to network shares you choose as destinations.</string>
+</dict>
+</plist>

@@ -11,12 +11,18 @@ let package = Package(
         .library(name: "IngestUI", targets: ["IngestUI"]),
         .executable(name: "PhotoFerry", targets: ["PhotoFerry"]),
         .executable(name: "pf", targets: ["pf"]),
+        .executable(name: "PhotoFerryCopyService", targets: ["PhotoFerryCopyService"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
     ],
     targets: [
-        .target(name: "PhotoFerryCore"),
+        .target(name: "PhotoFerryCore", dependencies: [.product(name: "GRDB", package: "GRDB.swift")]),
         .target(name: "IngestUI", dependencies: ["PhotoFerryCore"]),
         .executableTarget(name: "PhotoFerry", dependencies: ["PhotoFerryCore", "IngestUI"]),
         .executableTarget(name: "pf", dependencies: ["PhotoFerryCore"]),
+        // Bundled by scripts/package.sh as Contents/XPCServices/local.photoferry.copyservice.xpc.
+        .executableTarget(name: "PhotoFerryCopyService", dependencies: ["PhotoFerryCore"]),
         .testTarget(name: "PhotoFerryCoreTests", dependencies: ["PhotoFerryCore"]),
     ]
 )

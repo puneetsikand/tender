@@ -47,19 +47,28 @@ final class PartialWriter: @unchecked Sendable {
         }
     }
 
-    /// Syncs, closes and renames into place. Returns the outcome for this destination.
-    func finish(fullSync: Bool, modificationDate: Date?) -> DestinationOutcome {
-        if let failure { abandon(); return .failed(finalURL, reason: failure) }
-        guard let fd else { return .failed(finalURL, reason: "not open") }
+    /// Syncs and closes the partial. Returns false (and records why) on failure.
+    func seal(fullSync: Bool) -> Bool {
+        guard failure == nil, let fd else { abandon(); return false }
         if fullSync, fcntl(fd.rawValue, F_FULLFSYNC) == -1, fsync(fd.rawValue) == -1 {
             fail("fsync: errno \(errno)")
-            return .failed(finalURL, reason: failure!)
+            return false
         }
-        try? fd.close()
+        do { try fd.close() } catch { self.fd = nil; fail("close: \(error.localizedDescription)"); return false }
         self.fd = nil
+        return true
+    }
 
-        // Rename without ever replacing a file that appeared meanwhile. RENAME_EXCL isn't
-        // supported everywhere (some network filesystems), so fall back to check-then-rename.
+    /// Marks a sealed partial as failed (e.g. verification) and deletes it.
+    func reject(_ reason: String) {
+        fail(reason)
+    }
+
+    /// Renames a sealed, verified partial to its final name. Never replaces an existing file.
+    func commit(verification: DestinationVerification, modificationDate: Date?) -> DestinationOutcome {
+        if let failure { abandon(); return .failed(finalURL, reason: failure) }
+        // RENAME_EXCL isn't supported everywhere (some network filesystems), so fall back to
+        // check-then-rename.
         var ok = renamex_np(partialURL.path, finalURL.path, UInt32(RENAME_EXCL)) == 0
         if !ok, errno == ENOTSUP || errno == EINVAL {
             ok = !FileManager.default.fileExists(atPath: finalURL.path)
@@ -73,7 +82,7 @@ final class PartialWriter: @unchecked Sendable {
         if let modificationDate {
             try? FileManager.default.setAttributes([.modificationDate: modificationDate], ofItemAtPath: finalURL.path)
         }
-        return .written(finalURL)
+        return .written(finalURL, verification)
     }
 
     /// Closes and deletes the partial file.

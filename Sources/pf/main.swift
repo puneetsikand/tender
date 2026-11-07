@@ -12,8 +12,12 @@ usage: pf version
        pf cameras              stream USB/PTP camera connections (Ctrl-C to stop)
        pf scan <path>          list media items on a card or folder, with capture metadata
        pf copy <source> --to <dir> [--to <dir>…] [--flat] [--chunk <MB>] [--inflight <n>] [--no-sync]
+               [--verify hash|paranoid|bytes|size]   default hash: re-read each copy from disk
+               [--runner auto|xpc|local]   auto = the app's copy service when pf runs from inside
+                                           PhotoFerry.app, otherwise in this process
                                copy media (reading each file once) into every destination;
                                keeps the card's folder layout unless --flat
+       pf history [n]          recent jobs from the ledger (PF_LEDGER overrides its location)
        pf probe <mount>        dump DiskArbitration + IOKit details behind a volume (card ID experiment)
 """
 
@@ -91,6 +95,7 @@ case "copy":
     guard let sourcePath = rest.popFirst() else { fail(usage) }
     var roots: [URL] = []
     var flat = false
+    var runnerChoice = "auto"
     let sourceURL = URL(fileURLWithPath: sourcePath, isDirectory: true)
     var options = CopyOptions.defaults(for: VolumeMonitor.describe(mountPoint: sourceURL))
     while let flag = rest.popFirst() {
@@ -100,6 +105,8 @@ case "copy":
         case "--chunk": guard let v = rest.popFirst().flatMap(Int.init) else { fail(usage) }; options.chunkSize = v << 20
         case "--inflight": guard let v = rest.popFirst().flatMap(Int.init) else { fail(usage) }; options.filesInFlight = v
         case "--no-sync": options.fullSync = false
+        case "--verify": guard let m = rest.popFirst().flatMap(VerifyMode.init(rawValue:)) else { fail(usage) }; options.verify = m
+        case "--runner": guard let r = rest.popFirst(), ["auto", "xpc", "local"].contains(r) else { fail(usage) }; runnerChoice = r
         default: fail(usage)
         }
     }
@@ -109,23 +116,55 @@ case "copy":
         CopyRequest(source: f, destinations: roots.map { $0.appendingPathComponent(flat ? f.fileName : f.relativePath) })
     }
     let totalBytes = files.reduce(Int64(0)) { $0 + $1.size }
+    let job = CopyJob(source: JobSource.describing(sourceURL), destinationRoots: roots, requests: requests, options: options)
+    let runner: any CopyRunner
+    switch runnerChoice {
+    case "local": runner = InProcessCopyRunner()
+    case "xpc":
+        guard CopyRunners.bundledServiceAvailable else { fail("no copy service at \(CopyRunners.bundledServiceURL.path)") }
+        do { runner = try XPCCopyRunner() } catch { fail("copy service: \(error)") }
+    default: runner = CopyRunners.preferred()
+    }
+    print("runner: \(runner.name)")
     print("copying \(files.count) files (\(totalBytes.formatted(sizeFormat))) to \(roots.count) destination(s), "
-          + "chunk \(options.chunkSize >> 20) MB, \(options.filesInFlight) in flight, sync \(options.fullSync ? "on" : "off")")
-    for await event in CopyEngine(options: options).run(requests) {
+          + "chunk \(options.chunkSize >> 20) MB, \(options.filesInFlight) in flight, sync \(options.fullSync ? "on" : "off"), verify \(options.verify.rawValue)")
+    if let key = job.source.cardKey { print("card \(key)") }
+    var paths: [VerifyPath: Int] = [:]
+    for await event in runner.run(job) {
         switch event {
-        case .fileFinished(_, let r) where !r.succeeded:
+        case .fileFinished(_, let r):
+            for case let .written(_, v) in r.destinations { paths[v.path, default: 0] += 1 }
+            guard !r.succeeded else { break }
             print("FAILED \(r.request.source.relativePath): \(r.sourceError ?? "")")
             for case let .failed(url, reason) in r.destinations { print("    \(url.path): \(reason)") }
+        case .notice(let text):
+            print(text)
         case .finished(let s):
             print(String(format: "%d files, %@ in %.2f s = %.0f MB/s read (%.0f MB/s written)",
                          s.results.count, s.bytesRead.formatted(sizeFormat),
                          Double(s.elapsed.components.seconds) + Double(s.elapsed.components.attoseconds) / 1e18,
                          s.megabytesPerSecond, s.megabytesPerSecond * Double(roots.count)))
-            print(s.allSucceeded ? "all files copied" : "\(s.failed.count) file(s) failed")
+            print("verified copies: " + paths.sorted { $0.key.rawValue < $1.key.rawValue }.map { "\($0.value) \($0.key.rawValue)" }.joined(separator: ", "))
+            print(s.allSucceeded ? "all files copied and verified" : "\(s.failed.count) file(s) failed")
             if !s.allSucceeded { exit(1) }
+        case .interrupted(let reason):
+            print("INTERRUPTED: \(reason)")
+            exit(2)
         default: break
         }
     }
+
+case "history":
+    let ledger = try Ledger()
+    let n = args.count > 1 ? Int(args[1]) ?? 20 : 20
+    let fmt = Date.FormatStyle(date: .numeric, time: .standard)
+    for j in try ledger.recentJobs(limit: n) {
+        let size = j.bytesRead.map { $0.formatted(sizeFormat) } ?? "-"
+        print("\(j.startedAt.formatted(fmt))  \(j.status.rawValue.padding(toLength: 11, withPad: " ", startingAt: 0))  "
+              + "\(j.filesRecorded)/\(j.filesTotal) files  \(j.filesFailed.map { "\($0) failed" } ?? "")  \(size)  verify=\(j.verifyMode)  "
+              + "\(j.volumeLabel ?? j.sourceRoot)  \(j.cardKey ?? "")")
+    }
+    print("ledger: \(Ledger.defaultURL.path)")
 
 case "probe":
     guard args.count == 2 else { fail(usage) }
