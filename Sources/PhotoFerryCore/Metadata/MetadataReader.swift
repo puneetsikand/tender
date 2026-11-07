@@ -48,6 +48,7 @@ public struct MetadataReader: Sendable {
             if let parsed = Self.parseExifDate(raw, offset: offset, subsec: subsec, fallback: fallbackTimeZone) {
                 meta.captureDate = parsed.date
                 meta.captureDateHasOffset = parsed.hasOffset
+                meta.captureUTCOffsetSeconds = parsed.offsetSeconds
             }
         }
         return meta
@@ -55,7 +56,7 @@ public struct MetadataReader: Sendable {
 
     /// Parses EXIF `yyyy:MM:dd HH:mm:ss`, with optional `±HH:MM` offset and sub-second digits.
     static func parseExifDate(_ raw: String, offset: String?, subsec: String?,
-                              fallback: TimeZone) -> (date: Date, hasOffset: Bool)? {
+                              fallback: TimeZone) -> (date: Date, hasOffset: Bool, offsetSeconds: Int?)? {
         guard let m = raw.trimmingCharacters(in: .whitespaces)
             .wholeMatch(of: /(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/) else { return nil }
         var parts = DateComponents()
@@ -64,13 +65,16 @@ public struct MetadataReader: Sendable {
         guard parts.year != 0 else { return nil }   // "0000:00:00 00:00:00" = clock never set
 
         var zone = fallback
-        var hasOffset = false
+        var offsetSeconds: Int?
         if let offset, let o = offset.trimmingCharacters(in: .whitespaces)
-            .wholeMatch(of: /([+-])(\d{2}):(\d{2})/),
-           let tz = TimeZone(secondsFromGMT: (o.1 == "-" ? -1 : 1) * (Int(o.2)! * 3600 + Int(o.3)! * 60)) {
-            zone = tz
-            hasOffset = true
+            .wholeMatch(of: /([+-])(\d{2}):(\d{2})/) {
+            let seconds = (o.1 == "-" ? -1 : 1) * (Int(o.2)! * 3600 + Int(o.3)! * 60)
+            if let tz = TimeZone(secondsFromGMT: seconds) {
+                zone = tz
+                offsetSeconds = seconds
+            }
         }
+        let hasOffset = offsetSeconds != nil
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = zone
         guard var date = calendar.date(from: parts) else { return nil }
@@ -78,7 +82,7 @@ public struct MetadataReader: Sendable {
            let value = Double("0." + digits.output) {
             date += value
         }
-        return (date, hasOffset)
+        return (date, hasOffset, offsetSeconds)
     }
 
     // MARK: Video (AVFoundation)

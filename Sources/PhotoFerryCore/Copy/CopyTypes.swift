@@ -5,10 +5,13 @@ public struct CopyRequest: Sendable, Hashable, Codable {
     public let source: SourceFile
     /// Final destination file URLs, one per destination root. Their parent folders are created.
     public let destinations: [URL]
+    /// Capture metadata the planner read, recorded in the ledger. Nil for ad-hoc copies.
+    public let metadata: CaptureMetadata?
 
-    public init(source: SourceFile, destinations: [URL]) {
+    public init(source: SourceFile, destinations: [URL], metadata: CaptureMetadata? = nil) {
         self.source = source
         self.destinations = destinations
+        self.metadata = metadata
     }
 }
 

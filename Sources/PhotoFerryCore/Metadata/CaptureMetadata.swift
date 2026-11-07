@@ -7,6 +7,9 @@ public struct CaptureMetadata: Sendable, Hashable, Codable {
     public var captureDate: Date?
     /// True when the file recorded its own UTC offset (EXIF `OffsetTimeOriginal`, QuickTime dates).
     public var captureDateHasOffset = false
+    /// The UTC offset the camera recorded (EXIF `OffsetTimeOriginal`), in seconds. Templates
+    /// render dates in this offset, i.e. local time where the photo was taken.
+    public var captureUTCOffsetSeconds: Int?
     public var cameraMake: String?
     public var cameraModel: String?
     /// Camera body serial number (EXIF `BodySerialNumber`, or the older ExifAux serial).

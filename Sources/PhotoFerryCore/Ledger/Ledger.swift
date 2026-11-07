@@ -65,6 +65,17 @@ public final class Ledger: Sendable {
                 t.column("destinationSha256", .text)
             }
         }
+        m.registerMigration("v2: capture metadata, workflow") { db in
+            try db.alter(table: "job") { t in t.add(column: "workflowName", .text) }
+            try db.alter(table: "file") { t in
+                t.add(column: "capturedAt", .datetime)
+                t.add(column: "captureUTCOffset", .integer)   // seconds; NULL when the camera recorded none
+                t.add(column: "cameraMake", .text)
+                t.add(column: "cameraModel", .text)
+                t.add(column: "bodySerial", .text).indexed()
+                t.add(column: "lensModel", .text)
+            }
+        }
         return m
     }
 
@@ -73,10 +84,11 @@ public final class Ledger: Sendable {
     public func beginJob(_ job: CopyJob, at date: Date = .now) throws {
         try pool.write { db in
             try db.execute(sql: """
-                INSERT INTO job (id, startedAt, status, pid, sourceRoot, volumeLabel, volumeUUID, cardKey, verifyMode, filesTotal)
-                VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO job (id, startedAt, status, pid, sourceRoot, volumeLabel, volumeUUID, cardKey, verifyMode, filesTotal, workflowName)
+                VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [job.id.uuidString, date, Int(getpid()), job.source.root.path, job.source.volumeLabel,
-                                 job.source.volumeUUID, job.source.cardKey, job.options.verify.rawValue, job.requests.count])
+                                 job.source.volumeUUID, job.source.cardKey, job.options.verify.rawValue, job.requests.count,
+                                 job.workflowName])
             for root in job.destinationRoots {
                 try db.execute(sql: "INSERT INTO jobDestination (jobId, root) VALUES (?, ?)",
                                arguments: [job.id.uuidString, root.path])
@@ -88,9 +100,15 @@ public final class Ledger: Sendable {
     /// an accurate record of what was copied.
     public func recordFile(job: UUID, _ r: FileCopyResult) throws {
         try pool.write { db in
-            try db.execute(sql: "INSERT INTO file (jobId, relativePath, size, modifiedAt, sha256, sourceError) VALUES (?, ?, ?, ?, ?, ?)",
-                           arguments: [job.uuidString, r.request.source.relativePath, r.request.source.size,
-                                       r.request.source.modificationDate, r.sourceSHA256, r.sourceError])
+            let m = r.request.metadata
+            try db.execute(sql: """
+                INSERT INTO file (jobId, relativePath, size, modifiedAt, sha256, sourceError,
+                                  capturedAt, captureUTCOffset, cameraMake, cameraModel, bodySerial, lensModel)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, arguments: [job.uuidString, r.request.source.relativePath, r.request.source.size,
+                                 r.request.source.modificationDate, r.sourceSHA256, r.sourceError,
+                                 m?.captureDate, m?.captureUTCOffsetSeconds, m?.cameraMake, m?.cameraModel,
+                                 m?.bodySerial, m?.lensModel])
             let fileId = db.lastInsertedRowID
             for d in r.destinations {
                 switch d {
@@ -165,6 +183,7 @@ public struct JobRecord: Sendable, Hashable {
     public let sourceRoot: String
     public let volumeLabel: String?
     public let cardKey: String?
+    public let workflowName: String?
     public let verifyMode: String
     public let filesTotal: Int
     public let filesRecorded: Int
@@ -179,6 +198,7 @@ public struct JobRecord: Sendable, Hashable {
         sourceRoot = row["sourceRoot"]
         volumeLabel = row["volumeLabel"]
         cardKey = row["cardKey"]
+        workflowName = row["workflowName"]
         verifyMode = row["verifyMode"]
         filesTotal = row["filesTotal"]
         filesRecorded = row["filesRecorded"]

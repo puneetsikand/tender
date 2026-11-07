@@ -17,6 +17,10 @@ usage: pf version
                                            PhotoFerry.app, otherwise in this process
                                copy media (reading each file once) into every destination;
                                keeps the card's folder layout unless --flat
+       pf workflow new [name] [--root <dir>]   save a starter workflow (date, then type)
+       pf workflow list | show <name>       list saved workflows / print one's description
+       pf plan <workflow> <source>          preview where every file would go; copies nothing
+       pf run <workflow> <source> [--runner auto|xpc|local]   plan, then copy and verify
        pf history [n]          recent jobs from the ledger (PF_LEDGER overrides its location)
        pf probe <mount>        dump DiskArbitration + IOKit details behind a volume (card ID experiment)
 """
@@ -36,6 +40,61 @@ func describe(_ v: VolumeInfo) -> String {
 }
 
 let sizeFormat = ByteCountFormatStyle(style: .file)
+
+func runner(_ choice: String) -> any CopyRunner {
+    switch choice {
+    case "local": return InProcessCopyRunner()
+    case "xpc":
+        guard CopyRunners.bundledServiceAvailable else { fail("no copy service at \(CopyRunners.bundledServiceURL.path)") }
+        do { return try XPCCopyRunner() } catch { fail("copy service: \(error)") }
+    default: return CopyRunners.preferred()
+    }
+}
+
+/// Runs a job, printing failures, notices and a summary. Exits non-zero unless every file verified.
+func execute(_ job: CopyJob, on runner: any CopyRunner) async {
+    let total = job.requests.reduce(Int64(0)) { $0 + $1.source.size }
+    print("runner: \(runner.name)")
+    print("copying \(job.requests.count) files (\(total.formatted(sizeFormat))) to \(job.destinationRoots.count) destination(s), "
+          + "chunk \(job.options.chunkSize >> 20) MB, \(job.options.filesInFlight) in flight, sync \(job.options.fullSync ? "on" : "off"), verify \(job.options.verify.rawValue)")
+    if let key = job.source.cardKey { print("card \(key)") }
+    var paths: [VerifyPath: Int] = [:]
+    for await event in runner.run(job) {
+        switch event {
+        case .fileFinished(_, let r):
+            for case let .written(_, v) in r.destinations { paths[v.path, default: 0] += 1 }
+            guard !r.succeeded else { break }
+            print("FAILED \(r.request.source.relativePath): \(r.sourceError ?? "")")
+            for case let .failed(url, reason) in r.destinations { print("    \(url.path): \(reason)") }
+        case .notice(let text):
+            print(text)
+        case .finished(let s):
+            print(String(format: "%d files, %@ in %.2f s = %.0f MB/s read",
+                         s.results.count, s.bytesRead.formatted(sizeFormat),
+                         Double(s.elapsed.components.seconds) + Double(s.elapsed.components.attoseconds) / 1e18,
+                         s.megabytesPerSecond))
+            print("verified copies: " + paths.sorted { $0.key.rawValue < $1.key.rawValue }.map { "\($0.value) \($0.key.rawValue)" }.joined(separator: ", "))
+            print(s.allSucceeded ? "all files copied and verified" : "\(s.failed.count) file(s) failed")
+            if !s.allSucceeded { exit(1) }
+        case .interrupted(let reason):
+            print("INTERRUPTED: \(reason)")
+            exit(2)
+        default: break
+        }
+    }
+}
+
+func planOrFail(_ workflowName: String, _ sourcePath: String) async -> (CopyPlan, JobSource) {
+    let workflow: Workflow
+    do { workflow = try WorkflowStore().load(workflowName) } catch { fail("workflow \"\(workflowName)\": \(error)") }
+    let planner: Planner
+    do { planner = try Planner(workflow) } catch { fail("\(error)") }
+    let root = URL(fileURLWithPath: sourcePath, isDirectory: true)
+    let source = JobSource.describing(root)
+    let files: [SourceFile]
+    do { files = try CardScanner().scan(root) } catch { fail("scan: \(error)") }
+    return (await planner.plan(files, cardLabel: source.volumeLabel ?? root.lastPathComponent), source)
+}
 
 switch args.first {
 case "version", "--version", "-v":
@@ -115,44 +174,50 @@ case "copy":
     let requests = files.map { f in
         CopyRequest(source: f, destinations: roots.map { $0.appendingPathComponent(flat ? f.fileName : f.relativePath) })
     }
-    let totalBytes = files.reduce(Int64(0)) { $0 + $1.size }
     let job = CopyJob(source: JobSource.describing(sourceURL), destinationRoots: roots, requests: requests, options: options)
-    let runner: any CopyRunner
-    switch runnerChoice {
-    case "local": runner = InProcessCopyRunner()
-    case "xpc":
-        guard CopyRunners.bundledServiceAvailable else { fail("no copy service at \(CopyRunners.bundledServiceURL.path)") }
-        do { runner = try XPCCopyRunner() } catch { fail("copy service: \(error)") }
-    default: runner = CopyRunners.preferred()
-    }
-    print("runner: \(runner.name)")
-    print("copying \(files.count) files (\(totalBytes.formatted(sizeFormat))) to \(roots.count) destination(s), "
-          + "chunk \(options.chunkSize >> 20) MB, \(options.filesInFlight) in flight, sync \(options.fullSync ? "on" : "off"), verify \(options.verify.rawValue)")
-    if let key = job.source.cardKey { print("card \(key)") }
-    var paths: [VerifyPath: Int] = [:]
-    for await event in runner.run(job) {
-        switch event {
-        case .fileFinished(_, let r):
-            for case let .written(_, v) in r.destinations { paths[v.path, default: 0] += 1 }
-            guard !r.succeeded else { break }
-            print("FAILED \(r.request.source.relativePath): \(r.sourceError ?? "")")
-            for case let .failed(url, reason) in r.destinations { print("    \(url.path): \(reason)") }
-        case .notice(let text):
-            print(text)
-        case .finished(let s):
-            print(String(format: "%d files, %@ in %.2f s = %.0f MB/s read (%.0f MB/s written)",
-                         s.results.count, s.bytesRead.formatted(sizeFormat),
-                         Double(s.elapsed.components.seconds) + Double(s.elapsed.components.attoseconds) / 1e18,
-                         s.megabytesPerSecond, s.megabytesPerSecond * Double(roots.count)))
-            print("verified copies: " + paths.sorted { $0.key.rawValue < $1.key.rawValue }.map { "\($0.value) \($0.key.rawValue)" }.joined(separator: ", "))
-            print(s.allSucceeded ? "all files copied and verified" : "\(s.failed.count) file(s) failed")
-            if !s.allSucceeded { exit(1) }
-        case .interrupted(let reason):
-            print("INTERRUPTED: \(reason)")
-            exit(2)
-        default: break
+    await execute(job, on: runner(runnerChoice))
+
+case "workflow":
+    let store = WorkflowStore()
+    switch args.dropFirst().first {
+    case "new":
+        var rest = args.dropFirst(2)
+        var name = "Date, then type"
+        var root = "~/Pictures/PhotoFerry"
+        while let a = rest.popFirst() {
+            if a == "--root" { guard let r = rest.popFirst() else { fail(usage) }; root = r } else { name = a }
         }
+        do { print("saved \(try store.save(Workflow.starter(name: name, root: root)).path)") } catch { fail("\(error)") }
+    case "list":
+        for (url, w) in try store.list() { print("\(w?.name ?? "(unreadable)")\t\(url.path)") }
+        print("folder: \(store.folder.path)")
+    case "show":
+        guard args.count == 3 else { fail(usage) }
+        do { print(WorkflowDescriber.markdown(try store.load(args[2]))) } catch { fail("\(error)") }
+    default: fail(usage)
     }
+
+case "plan":
+    guard args.count == 3 else { fail(usage) }
+    let (plan, source) = await planOrFail(args[1], args[2])
+    let roots = Dictionary(uniqueKeysWithValues: plan.workflow.destinations.map { ($0.id, $0.name) })
+    for e in plan.entries {
+        print("\(e.file.relativePath)  →  \(e.relativePath)  [\(e.destinationIDs.compactMap { roots[$0] }.joined(separator: ", "))]")
+    }
+    for f in plan.skipped { print("\(f.relativePath)  →  (stays on card)") }
+    for issue in plan.issues { print(issue) }
+    print("\(plan.entries.count) files planned, \(plan.skipped.count) left on the card, source \(source.volumeLabel ?? source.root.path)"
+          + (plan.canRun ? "" : ". CANNOT RUN"))
+    if !plan.canRun { exit(1) }
+
+case "run":
+    guard args.count >= 3 else { fail(usage) }
+    var choice = "auto"
+    if args.count == 5, args[3] == "--runner" { choice = args[4] }
+    let (plan, source) = await planOrFail(args[1], args[2])
+    for issue in plan.issues { print(issue) }
+    guard plan.canRun else { fail("plan has errors; nothing copied (see pf plan)") }
+    await execute(plan.job(source: source), on: runner(choice))
 
 case "history":
     let ledger = try Ledger()
@@ -162,7 +227,7 @@ case "history":
         let size = j.bytesRead.map { $0.formatted(sizeFormat) } ?? "-"
         print("\(j.startedAt.formatted(fmt))  \(j.status.rawValue.padding(toLength: 11, withPad: " ", startingAt: 0))  "
               + "\(j.filesRecorded)/\(j.filesTotal) files  \(j.filesFailed.map { "\($0) failed" } ?? "")  \(size)  verify=\(j.verifyMode)  "
-              + "\(j.volumeLabel ?? j.sourceRoot)  \(j.cardKey ?? "")")
+              + "\(j.volumeLabel ?? j.sourceRoot)  \(j.workflowName.map { "workflow=\"\($0)\"" } ?? "")  \(j.cardKey ?? "")")
     }
     print("ledger: \(Ledger.defaultURL.path)")
 

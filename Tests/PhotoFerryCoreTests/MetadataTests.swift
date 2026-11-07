@@ -7,8 +7,8 @@ import UniformTypeIdentifiers
 
 @Suite struct MetadataReaderTests {
     /// Writes a small JPEG carrying the given EXIF/TIFF properties.
-    func makeJPEG(exif: [CFString: Any], tiff: [CFString: Any]) throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("pf-\(UUID().uuidString).jpg")
+    static func makeJPEG(exif: [CFString: Any], tiff: [CFString: Any], at url: URL? = nil) throws -> URL {
+        let url = url ?? FileManager.default.temporaryDirectory.appendingPathComponent("pf-\(UUID().uuidString).jpg")
         let ctx = CGContext(data: nil, width: 64, height: 48, bitsPerComponent: 8, bytesPerRow: 0,
                             space: CGColorSpace(name: CGColorSpace.sRGB)!,
                             bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
@@ -24,7 +24,7 @@ import UniformTypeIdentifiers
     }
 
     @Test func readsCameraSerialLensAndOffsetDate() async throws {
-        let url = try makeJPEG(
+        let url = try Self.makeJPEG(
             exif: [kCGImagePropertyExifDateTimeOriginal: "2026:11:07 14:30:05",
                    kCGImagePropertyExifOffsetTimeOriginal: "-05:00",
                    kCGImagePropertyExifSubsecTimeOriginal: "25",

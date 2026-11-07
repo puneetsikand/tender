@@ -8,7 +8,7 @@ Read [`docs/PLAN.md`](docs/PLAN.md) before changing code.
 ```
 swift build && swift test        # engine + tests
 swift run PhotoFerry             # the app (dev)
-swift run pf version             # the CLI (also: volumes, watch, cameras, scan <path>, probe <mount>)
+swift run pf version             # the CLI (also: volumes, watch, cameras, scan, probe, copy, workflow, plan, run, history)
 scripts/package.sh               # dist/PhotoFerry.app
 ```
 
@@ -24,6 +24,9 @@ scripts/package.sh               # dist/PhotoFerry.app
 - Jobs: hosts build a `CopyJob` and run it via a `CopyRunner`; `JobExecutor` runs engine → ledger → manifests in
   whichever process does the copy. Ledger: `~/Library/Application Support/PhotoFerry/ledger.sqlite` (GRDB, typed
   columns, no JSON); `PF_LEDGER` overrides it for the in-process CLI only (the XPC service always uses the default).
+- Workflows: `Workflow` → `Planner` (validate, then plan) → `CopyPlan` (= the preview) → `CopyJob`. Stored as JSON in
+  `~/Library/Application Support/PhotoFerry/Workflows` (`PF_WORKFLOWS` overrides). Test against real cards with
+  `PF_WORKFLOWS`/`PF_LEDGER` pointed at the scratchpad and `--runner local`, so the user's real store stays clean.
 - `Packaging/`: Info.plist template (`__VERSION__` is substituted). `VERSION` holds the version.
 
 ## Rules

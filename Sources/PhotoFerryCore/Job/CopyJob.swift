@@ -9,9 +9,13 @@ public struct CopyJob: Sendable, Hashable, Codable, Identifiable {
     public let destinationRoots: [URL]
     public let requests: [CopyRequest]
     public let options: CopyOptions
+    /// The workflow that planned this job; nil for ad-hoc `pf copy` jobs.
+    public let workflowName: String?
 
-    public init(id: UUID = UUID(), source: JobSource, destinationRoots: [URL], requests: [CopyRequest], options: CopyOptions) {
+    public init(id: UUID = UUID(), source: JobSource, destinationRoots: [URL], requests: [CopyRequest],
+                options: CopyOptions, workflowName: String? = nil) {
         self.id = id
+        self.workflowName = workflowName
         self.source = source
         self.destinationRoots = destinationRoots
         self.requests = requests
