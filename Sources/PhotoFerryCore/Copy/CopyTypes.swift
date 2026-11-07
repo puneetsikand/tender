@@ -1,0 +1,86 @@
+import Foundation
+
+/// One source file and the final paths it must land at.
+public struct CopyRequest: Sendable, Hashable {
+    public let source: SourceFile
+    /// Final destination file URLs, one per destination root. Their parent folders are created.
+    public let destinations: [URL]
+
+    public init(source: SourceFile, destinations: [URL]) {
+        self.source = source
+        self.destinations = destinations
+    }
+}
+
+public struct CopyOptions: Sendable, Hashable {
+    /// Bytes per read. Every destination gets the same chunk.
+    public var chunkSize: Int
+    /// Source files copied at once. SD cards are sequential devices; too many in flight thrash.
+    public var filesInFlight: Int
+    /// `F_FULLFSYNC` each file before renaming it into place (falls back to `fsync`).
+    public var fullSync: Bool
+
+    public init(chunkSize: Int = 8 << 20, filesInFlight: Int = 2, fullSync: Bool = true) {
+        self.chunkSize = chunkSize
+        self.filesInFlight = filesInFlight
+        self.fullSync = fullSync
+    }
+
+    /// Defaults for a source volume, by the bus DiskArbitration reports (PLAN §4).
+    public static func defaults(for volume: VolumeInfo?) -> CopyOptions {
+        switch volume?.deviceProtocol {
+        case "Secure Digital", "USB": CopyOptions(filesInFlight: 2)
+        case "PCI-Express", "PCI", "Apple Fabric", "NVMe", "Thunderbolt": CopyOptions(filesInFlight: 4)
+        default: CopyOptions(filesInFlight: 2)
+        }
+    }
+}
+
+public enum DestinationOutcome: Sendable, Hashable {
+    case written(URL)
+    case failed(URL, reason: String)
+
+    public var url: URL {
+        switch self { case .written(let u), .failed(let u, _): u }
+    }
+    public var isWritten: Bool {
+        if case .written = self { true } else { false }
+    }
+}
+
+public struct FileCopyResult: Sendable, Hashable {
+    public let request: CopyRequest
+    /// SHA-256 of the bytes read from the source, or nil if the read failed.
+    public let sourceSHA256: String?
+    public let bytesRead: Int64
+    /// Source-side failure (unreadable file, cancelled). When set, nothing was written.
+    public let sourceError: String?
+    public let destinations: [DestinationOutcome]
+
+    /// True only if the source was read and *every* destination was written.
+    /// Never true for a request without destinations.
+    public var succeeded: Bool {
+        sourceError == nil && !destinations.isEmpty && destinations.allSatisfy(\.isWritten)
+    }
+}
+
+public enum CopyEvent: Sendable {
+    case fileStarted(index: Int, SourceFile)
+    case progress(index: Int, bytesDone: Int64)
+    case fileFinished(index: Int, FileCopyResult)
+    case finished(CopySummary)
+}
+
+public struct CopySummary: Sendable, Hashable {
+    public let results: [FileCopyResult]
+    public let bytesRead: Int64
+    public let elapsed: Duration
+
+    public var failed: [FileCopyResult] { results.filter { !$0.succeeded } }
+    /// Guarded against the empty job: copying nothing is not "all succeeded".
+    public var allSucceeded: Bool { !results.isEmpty && results.allSatisfy(\.succeeded) }
+    public var megabytesPerSecond: Double {
+        let s = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+        return s > 0 ? Double(bytesRead) / 1_000_000 / s : 0
+    }
+}

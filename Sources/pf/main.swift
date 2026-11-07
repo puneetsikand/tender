@@ -11,6 +11,9 @@ usage: pf version
        pf watch                stream volume mount/unmount events (Ctrl-C to stop)
        pf cameras              stream USB/PTP camera connections (Ctrl-C to stop)
        pf scan <path>          list media items on a card or folder, with capture metadata
+       pf copy <source> --to <dir> [--to <dir>…] [--flat] [--chunk <MB>] [--inflight <n>] [--no-sync]
+                               copy media (reading each file once) into every destination;
+                               keeps the card's folder layout unless --flat
        pf probe <mount>        dump DiskArbitration + IOKit details behind a volume (card ID experiment)
 """
 
@@ -82,6 +85,47 @@ case "scan":
     let total = files.reduce(Int64(0)) { $0 + $1.size }
     print("\(items.count) items, \(files.count) files, \(total.formatted(sizeFormat))")
     for (body, n) in serials.sorted(by: { $0.value > $1.value }) { print("  camera \(body): \(n) items") }
+
+case "copy":
+    var rest = args.dropFirst()
+    guard let sourcePath = rest.popFirst() else { fail(usage) }
+    var roots: [URL] = []
+    var flat = false
+    let sourceURL = URL(fileURLWithPath: sourcePath, isDirectory: true)
+    var options = CopyOptions.defaults(for: VolumeMonitor.describe(mountPoint: sourceURL))
+    while let flag = rest.popFirst() {
+        switch flag {
+        case "--to": guard let d = rest.popFirst() else { fail(usage) }; roots.append(URL(fileURLWithPath: d, isDirectory: true))
+        case "--flat": flat = true
+        case "--chunk": guard let v = rest.popFirst().flatMap(Int.init) else { fail(usage) }; options.chunkSize = v << 20
+        case "--inflight": guard let v = rest.popFirst().flatMap(Int.init) else { fail(usage) }; options.filesInFlight = v
+        case "--no-sync": options.fullSync = false
+        default: fail(usage)
+        }
+    }
+    guard !roots.isEmpty else { fail("pf copy: at least one --to is required") }
+    let files = try CardScanner().scan(sourceURL)
+    let requests = files.map { f in
+        CopyRequest(source: f, destinations: roots.map { $0.appendingPathComponent(flat ? f.fileName : f.relativePath) })
+    }
+    let totalBytes = files.reduce(Int64(0)) { $0 + $1.size }
+    print("copying \(files.count) files (\(totalBytes.formatted(sizeFormat))) to \(roots.count) destination(s), "
+          + "chunk \(options.chunkSize >> 20) MB, \(options.filesInFlight) in flight, sync \(options.fullSync ? "on" : "off")")
+    for await event in CopyEngine(options: options).run(requests) {
+        switch event {
+        case .fileFinished(_, let r) where !r.succeeded:
+            print("FAILED \(r.request.source.relativePath): \(r.sourceError ?? "")")
+            for case let .failed(url, reason) in r.destinations { print("    \(url.path): \(reason)") }
+        case .finished(let s):
+            print(String(format: "%d files, %@ in %.2f s = %.0f MB/s read (%.0f MB/s written)",
+                         s.results.count, s.bytesRead.formatted(sizeFormat),
+                         Double(s.elapsed.components.seconds) + Double(s.elapsed.components.attoseconds) / 1e18,
+                         s.megabytesPerSecond, s.megabytesPerSecond * Double(roots.count)))
+            print(s.allSucceeded ? "all files copied" : "\(s.failed.count) file(s) failed")
+            if !s.allSucceeded { exit(1) }
+        default: break
+        }
+    }
 
 case "probe":
     guard args.count == 2 else { fail(usage) }
