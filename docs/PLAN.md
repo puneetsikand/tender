@@ -172,6 +172,11 @@ security-scoped bookmark.
 
 ## 8A. Standalone now, built to be integrated later
 
+> **2026-11-08: browser arc dropped.** The preview pane (`PhotoPreview`) covers what the user needs, so there's no separate
+> browser and no plugin integration. The module boundaries below stay: they cost nothing and keep the engine clean.
+> The product direction is now offsite backup (§13).
+
+
 Ingest ships first as its own app, and is built so that a future folder-based photo **browser** (fast 100MP+
 viewing, XMP-sidecar ratings, no catalog) can absorb it without a rewrite. The boundaries are fixed now:
 
@@ -208,8 +213,13 @@ Decided 2026-11-07:
 3. **Ledger: GRDB.**
 4. **Auto-run: yes, for recognized cards/cameras** by the rules in §3.2. It never deletes from a card without a click.
 
+Decided 2026-11-08 (cloud backup, §13):
+5. **Client-side encryption, optional per destination** (off by default, so plain buckets stay browsable).
+6. **Uploads run from a background queue that works from the verified local copy,** not from the card.
+7. **First providers: any S3-compatible service** (AWS S3, Backblaze B2 via its S3 API, Wasabi, R2, MinIO) **and a NAS reached over Tailscale.**
+
 Still open:
-5. **Name:** "PhotoFerry" is a placeholder.
+8. **Name:** "PhotoFerry" stays the working name until the cloud pitch is clear. Directions noted: Tender, Quay, Harbor, Tidemark, Ballast (trademarks not checked).
 
 ## 10. Milestones
 
@@ -250,6 +260,7 @@ Still open:
   **Still-being-written guard (2026-11-08):** Finder was caught mid-copy onto the card (GFX files at 0 bytes and half written). `WriteSettle` holds back empty files and files whose size changes between the scan and a second look 1.5 s later. They're listed as "writing…" and the card is re-read every 3 s until they settle; modification dates can't tell, since Finder keeps the original's date. The engine also refuses any file whose size changed since the scan.
   **Preview pane (2026-11-08):** new shared module `PhotoPreview` (`PreviewLoader`, for the future browser too): RAW uses the embedded preview (GFX100RF 102 MP RAF → 3000 px in ~70 ms from the card, versus 2–4 s for a RAW decode), JPEG/HEIF decode at reduced size, a 400 MB LRU cache, duplicate requests merged, look-ahead of 2 forward and 1 back (not during a copy). The pane sits right of the file list and follows its selection, with a two-way **RAW only / SOOC only** switch (selecting a DNG in SOOC mode shows its JPEG partner and vice versa), ← → stepping, "N of M", and camera, lens, exposure, capture time, size and copy status. The GFX100RF records a body serial (#52E00547); the X-E2 doesn't.
   **Still open:** SMB on a real NAS (throughput tuning, hung-share timeouts); deleting files from the card that an *earlier* job copied (needs re-verifying those copies first); persistent `{seq}` counters across jobs.
+- **M9 – Offsite backup (§13):** M9a S3 client + plain uploads + queue + ledger · M9b client-side encryption + restore · M9c Tailscale NAS destination + reachability · M9d UI (destination types, credentials, Uploads view, per-card offsite status).
 - **M8 – Polish:** resume interrupted jobs, error reporting, signing/notarization or App Store submission.
 
 ## 11. Test strategy
@@ -260,3 +271,56 @@ Still open:
 ## 12. Prior art to benchmark against
 Hedge/OffShoot, ShotPut Pro, Photo Mechanic Ingest, Lightroom Import. Their feature lists set the minimum
 bar for verification modes and MHL support.
+
+## 13. Offsite backup: S3-compatible buckets and NAS over Tailscale (M9)
+
+Goal: "offload once, keep it in three places, with proof." The card job is unchanged (copy, verify, optionally eject).
+Offsite copies come afterwards, from the verified local copy, in a queue that can take hours and survives restarts and sleep.
+
+**Destinations.** A workflow destination gets a kind: `folder` (today), `s3` (bucket + prefix + endpoint + region),
+or a folder/share on a tailnet machine flagged `viaTailscale`. Routes keep sending files to destination ids as they do
+now. Cloud destinations simply complete later, through the queue.
+
+**Upload queue (in the XPC service, so it outlives the app).**
+- Ledger tables: `upload` (file, local verified copy path, destination, state queued/uploading/done/failed/paused,
+  multipart upload id, parts done, bytes, attempts, last error) and `remoteObject` (bucket, key, version id, ETag,
+  checksum, encrypted, uploaded at).
+- Source = a local copy the ledger shows as verified. Before sending, its SHA-256 is known (the card hash), so a
+  copy that rotted on the local disk is caught when the server rejects the checksum.
+- Resumable: multipart for large files (GFX RAFs are about 120 MB), parts and upload id persisted, resumed after restart,
+  sleep or network loss. Exponential backoff. Pauses on Low Data Mode or expensive networks (`NWPathMonitor`), with an
+  optional bandwidth cap.
+- The app never deletes remote objects in v1.
+
+**Integrity end to end.** Single PUTs send `x-amz-checksum-sha256` (the card hash, base64), and S3 rejects a mismatch.
+Multipart sends a SHA-256 per part, and the completed object's composite checksum is checked with a HEAD. Provider support
+varies: AWS S3 supports these headers; Backblaze B2's S3-compatible API needs checking against current docs before we
+rely on it, with a fallback of ETag (MD5 for single parts, which we'd compute too) plus a ranged read-back sample.
+
+**S3 client.** Hand-written AWS SigV4 (CryptoKit HMAC-SHA256) over URLSession, no SDK. Path- and virtual-host-style
+endpoints, so it works with any S3-compatible service.
+
+**Client-side encryption (optional per destination).**
+- Streaming AES-256-GCM in fixed-size chunks (e.g. 1 MiB), each with its own nonce and authenticated position, so
+  truncation and reordering are detected. A random per-file key, wrapped by the destination's master key. A versioned header.
+- Master key in the Keychain. At setup the user must save a **recovery key** (shown once, printable). Without it, a lost
+  Mac means a lost backup, and the UI says so plainly.
+- Server-side checksum = SHA-256 of the ciphertext (computed while uploading). The plaintext hash is in the ledger and
+  inside the encrypted header, so a restore verifies the original bytes after decrypting.
+- Object names: open question. Plain paths leak dates and camera file names; hashed names need an encrypted index to browse.
+- **Restore ships with encryption, never after it:** download, decrypt, verify against the original SHA-256.
+
+**Credentials and safety.** Access keys live in the Keychain, never in the workflow JSON. Setup recommends a
+bucket-scoped key that **can't delete** (B2 and S3 support this) plus bucket versioning or Object Lock, so ransomware or
+a stolen laptop can't wipe the backup. "Test connection" = HeadBucket plus a small write under `.photoferry/`.
+
+**Tailscale (for your own storage, not cloud).** S3/B2 uploads already use TLS to a public endpoint, so Tailscale adds
+nothing there. For a NAS (SMB share or MinIO) it means reaching home storage from anywhere without exposing it. PhotoFerry
+doesn't embed Tailscale. It checks the peer is online (Tailscale's local status, e.g. `tailscale status --json`) before
+copying or queueing, shows "NAS reachable / offline (last seen …)", and pauses the queue while the peer is away.
+`DestinationGuard` still protects against an unmounted share.
+
+**UI.** Destination editor: kind picker, a credentials sheet with Test connection, the encryption toggle with the
+recovery-key step. Sidebar "Uploads": queue with progress, rate, pause/resume, errors. Card page and history: "Offsite:
+312/394 uploaded".
+
