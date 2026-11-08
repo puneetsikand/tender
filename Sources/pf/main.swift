@@ -22,6 +22,9 @@ usage: pf version
        pf workflow list | show <name>       list saved workflows / print one's description
        pf plan <workflow> <source>          preview where every file would go; copies nothing
        pf run <workflow> <source> [--runner auto|xpc|local]   plan, then copy and verify
+       pf s3 probe --endpoint <host> --bucket <b> --key-id <id> [--prefix p/] [--secret-stdin]
+                               integrity experiment against an S3-compatible bucket (secret from the
+                               Keychain, service local.photoferry.s3, or piped on stdin; never printed)
        pf history [n]          recent jobs from the ledger (PF_LEDGER overrides its location)
        pf probe <mount>        dump DiskArbitration + IOKit details behind a volume (card ID experiment)
 """
@@ -242,6 +245,32 @@ case "run":
     for issue in plan.issues { print(issue) }
     guard plan.canRun else { fail("plan has errors; nothing copied (see pf plan)") }
     await execute(plan.job(source: source), on: runner(choice))
+
+case "s3":
+    guard args.dropFirst().first == "probe" else { fail(usage) }
+    var rest = args.dropFirst(2)
+    var host = "", bucket = "", keyID = "", prefix = "photoferry-test/", fromStdin = false
+    while let a = rest.popFirst() {
+        switch a {
+        case "--endpoint": host = rest.popFirst() ?? ""
+        case "--bucket": bucket = rest.popFirst() ?? ""
+        case "--key-id": keyID = rest.popFirst() ?? ""
+        case "--prefix": prefix = rest.popFirst() ?? prefix
+        case "--secret-stdin": fromStdin = true
+        default: fail(usage)
+        }
+    }
+    guard !host.isEmpty, !bucket.isEmpty, !keyID.isEmpty else { fail(usage) }
+    let secret: String
+    if fromStdin {
+        secret = (readLine(strippingNewline: true) ?? "").trimmingCharacters(in: .whitespaces)
+    } else {
+        do { secret = try S3Keychain.secret(forKeyID: keyID) } catch { fail("\(error)") }
+    }
+    guard !secret.isEmpty else { fail("empty secret") }
+    let s3 = S3Client(endpoint: S3Endpoint(host: host, bucket: bucket), keyID: keyID, secret: secret)
+    print("endpoint \(host) region \(s3.endpoint.region) bucket \(bucket) prefix \(prefix)")
+    await S3Probe.run(s3, prefix: prefix)
 
 case "history":
     let ledger = try Ledger()
