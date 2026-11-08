@@ -4,6 +4,7 @@ import SwiftUI
 struct CardDetailView: View {
     let session: CardSession
     let library: WorkflowLibrary
+    var editWorkflow: (String) -> Void = { _ in }
     @State private var showingStarter = false
 
     var body: some View {
@@ -15,6 +16,8 @@ struct CardDetailView: View {
             } else {
                 planArea
             }
+            Divider()
+            actionBar
         }
         .navigationTitle(session.title)
         .toolbar {
@@ -30,7 +33,7 @@ struct CardDetailView: View {
                 Button {
                     session.startImport()
                 } label: {
-                    Label(importTitle, systemImage: "square.and.arrow.down")
+                    Label(copyTitle, systemImage: "doc.on.doc")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!session.canImport)
@@ -42,9 +45,43 @@ struct CardDetailView: View {
         }
     }
 
-    private var importTitle: String {
-        guard let plan = session.plan else { return "Import" }
-        return "Import \(plan.entries.count) Files"
+    private var copyTitle: String {
+        guard let plan = session.plan else { return "Copy" }
+        return "Copy \(plan.entries.count) Files"
+    }
+
+    /// Where the copy is started: always visible at the bottom of the card page.
+    private var actionBar: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "lock.shield").foregroundStyle(.secondary)
+            Text(destinationsSummary).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+            Spacer()
+            Button {
+                Task { await session.eject() }
+            } label: {
+                Label("Eject", systemImage: "eject")
+            }
+            .controlSize(.large)
+            .disabled(session.job?.isRunning == true || session.removed)
+            Button {
+                session.startImport()
+            } label: {
+                Label(session.job?.isRunning == true ? "Copying…" : copyTitle, systemImage: "doc.on.doc")
+                    .frame(minWidth: 140)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(!session.canImport)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+    }
+
+    private var destinationsSummary: String {
+        let safe = "Files are copied and verified. Nothing on the card is changed or deleted."
+        guard let plan = session.plan else { return safe }
+        let used = plan.workflow.destinations.filter { d in plan.entries.contains { $0.destinationIDs.contains(d.id) } }
+        guard !used.isEmpty else { return safe }
+        return "Copies to " + used.map(\.name).joined(separator: " and ") + ". " + safe
     }
 
     private var header: some View {
@@ -90,7 +127,13 @@ struct CardDetailView: View {
                 Picker("Workflow", selection: Binding(get: { session.workflowName }, set: { session.workflowName = $0 })) {
                     ForEach(library.workflows, id: \.name) { w in Text(w.name).tag(Optional(w.name)) }
                 }
-                Button("New Starter Workflow…") { showingStarter = true }.buttonStyle(.link).controlSize(.small)
+                HStack(spacing: 12) {
+                    if let name = session.workflowName {
+                        Button("Edit…") { editWorkflow(name) }
+                    }
+                    Button("New Starter Workflow…") { showingStarter = true }
+                }
+                .buttonStyle(.link).controlSize(.small)
             }
         }
     }
@@ -134,7 +177,7 @@ struct PlanPreview: View {
             Table(plan.entries.enumerated().map { Row(id: $0.offset, entry: $0.element) }) {
                 TableColumn("On card") { r in Text(r.entry.file.fileName) }
                     .width(min: 120, ideal: 160)
-                TableColumn("Goes to") { r in
+                TableColumn("Copied to") { r in
                     Text(r.entry.relativePath).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
                 }
                 TableColumn("Destination") { r in
@@ -146,7 +189,7 @@ struct PlanPreview: View {
             }
             if !plan.skipped.isEmpty {
                 Divider()
-                Text("\(plan.skipped.count) file(s) stay on the card").font(.callout).foregroundStyle(.secondary)
+                Text("\(plan.skipped.count) file(s) not copied").font(.callout).foregroundStyle(.secondary)
                     .padding(.horizontal, 16).padding(.vertical, 8)
             }
         }

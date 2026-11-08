@@ -43,6 +43,23 @@ public enum DevSnapshots {
         store.history.reload()
         show(.history)
         try await snap(window, outputDir.appending(path: "4-history.png"))
+
+        // Editor: rename the JPEG route's files and match the card's body, then render.
+        let name = store.library.workflows.first!.name
+        let draft = store.library.draft(for: name)!
+        if let jpeg = draft.workflow.routes.first(where: { $0.match.kinds?.contains(.jpeg) == true }) {
+            draft.updateRoute(jpeg.id) { $0.fileName = "{date:yyyyMMdd}_{camera}_{seq:4}" }
+            let nas = draft.addDestination(root: outputDir.appending(path: "nas").path)
+            draft.updateDestination(nas) { $0.name = "NAS" }
+            draft.updateRoute(jpeg.id) { $0.destinations.append(nas) }
+            draft.selection = .route(jpeg.id)
+        }
+        window.setContentSize(NSSize(width: 1440, height: 820))
+        window.contentView = NSHostingView(rootView: IngestRootView(store: store, initialSelection: .workflow(name))
+            .frame(width: 1440, height: 820)
+            .background(Color(nsColor: .windowBackgroundColor)))
+        _ = try await waitFor("the editor preview", timeout: 20) { draft.preview }
+        try await snap(window, outputDir.appending(path: "5-editor.png"))
     }
 
     struct Timeout: Error, CustomStringConvertible {

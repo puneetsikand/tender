@@ -46,16 +46,30 @@ public struct WorkflowStore: Sendable {
         return try Self.decode(Data(contentsOf: url))
     }
 
-    /// Validates, then writes the JSON and its Markdown description atomically.
+    /// Validates, then writes the JSON and its Markdown description atomically. With
+    /// `replacing`, a workflow saved under that earlier name is removed (a rename).
     @discardableResult
-    public func save(_ w: Workflow) throws -> URL {
+    public func save(_ w: Workflow, replacing oldName: String? = nil) throws -> URL {
         try Planner.validate(w)
+        let newBase = Self.fileName(for: w.name)
+        if oldName == nil || Self.fileName(for: oldName!) != newBase,
+           FileManager.default.fileExists(atPath: folder.appending(path: newBase + ".pfflow").path) {
+            throw WorkflowError.invalid(["a workflow named \"\(w.name)\" already exists"])
+        }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let base = folder.appending(path: Self.fileName(for: w.name))
         let json = base.appendingPathExtension("pfflow")
         try Self.encode(w).write(to: json, options: .atomic)
         try Data(WorkflowDescriber.markdown(w).utf8).write(to: base.appendingPathExtension("md"), options: .atomic)
+        if let oldName, Self.fileName(for: oldName) != newBase { try delete(oldName) }
         return json
+    }
+
+    /// Removes a workflow and its description.
+    public func delete(_ name: String) throws {
+        let base = folder.appending(path: Self.fileName(for: name))
+        try FileManager.default.removeItem(at: base.appendingPathExtension("pfflow"))
+        try? FileManager.default.removeItem(at: base.appendingPathExtension("md"))
     }
 }
 
@@ -72,15 +86,15 @@ public enum WorkflowDescriber {
         md += "\n## Routes\n\nEach file goes to the first route that matches it. Sidecar files (XMP, THM …) go with their photo or clip.\n\n"
         for (i, r) in w.routes.enumerated() {
             md += "\(i + 1). **\(r.name)**: \(matchText(r.match))"
-            if r.skip { md += " → left on the card\n"; continue }
+            if r.skip { md += " → not copied\n"; continue }
             let names = r.destinations.map { id in w.destinations.first { $0.id == id }?.name ?? id }
             md += " → `\(r.folder)/\(r.fileName).<ext>` in \(names.joined(separator: " and "))\n"
         }
-        md += "\nFiles no route matches stay on the card.\n"
+        md += "\nFiles no route matches aren't copied. PhotoFerry never changes or deletes anything on the card.\n"
         return md
     }
 
-    static func verifyText(_ m: VerifyMode) -> String {
+    public static func verifyText(_ m: VerifyMode) -> String {
         switch m {
         case .size: "size check only"
         case .hash: "every copy is re-read from disk and its SHA-256 compared with the card's"
@@ -89,7 +103,7 @@ public enum WorkflowDescriber {
         }
     }
 
-    static func matchText(_ m: Workflow.Match) -> String {
+    public static func matchText(_ m: Workflow.Match) -> String {
         var parts: [String] = []
         if let k = m.kinds { parts.append(k.map { $0.rawValue.uppercased() }.joined(separator: "/") + " files") }
         if let e = m.extensions { parts.append("extension " + e.map { "." + $0.lowercased() }.joined(separator: " or ")) }

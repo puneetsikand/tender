@@ -18,6 +18,7 @@ public struct IngestRootView: View {
     enum SidebarItem: Hashable {
         case card(String)
         case camera(String)
+        case workflow(String)
         case history
     }
 
@@ -29,12 +30,22 @@ public struct IngestRootView: View {
             switch selection {
             case .card(let id):
                 if let session = store.cards.first(where: { $0.id == id }) {
-                    CardDetailView(session: session, library: store.library)
+                    CardDetailView(session: session, library: store.library) { name in selection = .workflow(name) }
                 } else {
                     ContentUnavailableView("Card removed", systemImage: "sdcard")
                 }
             case .camera(let id):
                 CameraDetailView(camera: store.cameras.first { $0.id == id })
+            case .workflow(let name):
+                if let draft = store.library.draft(for: name) {
+                    WorkflowEditorView(draft: draft, library: store.library, previewCard: previewCard,
+                                       onSaved: { old, new in workflowSaved(old: old, new: new) },
+                                       onDeleted: { selection = nil },
+                                       onRun: { name in run(workflow: name) })
+                        .id(name)
+                } else {
+                    ContentUnavailableView("Workflow not found", systemImage: "arrow.triangle.branch")
+                }
             case .history:
                 HistoryView(history: store.history)
             case nil:
@@ -43,9 +54,38 @@ public struct IngestRootView: View {
             }
         }
         .task { store.start() }
+        .onChange(of: store.library.workflows.map(\.name)) { _, names in
+            if case .workflow(let n) = selection, !names.contains(n) { selection = nil }
+        }
         .onChange(of: store.cards.map(\.id)) { old, new in
             // Show a newly inserted card right away.
             if let added = new.first(where: { !old.contains($0) }) { selection = .card(added) }
+        }
+    }
+}
+
+extension IngestRootView {
+    /// The card the editor previews against: the one most recently selected, else the first.
+    var previewCard: CardSession? {
+        store.cards.first { !$0.removed && !$0.scanning }
+    }
+
+    /// Runs a workflow on the preview card and shows its progress.
+    func run(workflow name: String) {
+        guard let card = previewCard else { return }
+        selection = .card(card.id)
+        Task {
+            card.workflowName = name
+            await card.replan()
+            card.startImport()
+        }
+    }
+
+    /// Keeps the sidebar and open cards pointing at a workflow that was just saved (maybe renamed).
+    func workflowSaved(old: String, new: String) {
+        selection = .workflow(new)
+        for card in store.cards where card.workflowName == old || card.workflowName == new {
+            if card.workflowName != new { card.workflowName = new } else { Task { await card.replan() } }
         }
     }
 }
@@ -69,6 +109,21 @@ struct SidebarView: View {
                     ForEach(store.cameras, id: \.id) { cam in
                         Label(cam.name ?? "Camera", systemImage: "camera").tag(IngestRootView.SidebarItem.camera(cam.id))
                     }
+                }
+            }
+            Section {
+                ForEach(store.library.workflows, id: \.name) { w in
+                    Label(w.name, systemImage: "arrow.triangle.branch").tag(IngestRootView.SidebarItem.workflow(w.name))
+                }
+            } header: {
+                HStack {
+                    Text("Workflows")
+                    Spacer()
+                    Button {
+                        if let name = try? store.library.createWorkflow() { selection = .workflow(name) }
+                    } label: { Image(systemName: "plus") }
+                    .buttonStyle(.borderless)
+                    .help("New workflow")
                 }
             }
             Section {

@@ -225,3 +225,43 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: tmp.path))
     }
 }
+
+@Suite struct WorkflowStoreEditingTests {
+    let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("pf-store-edit-\(UUID().uuidString)")
+
+    func files() -> Set<String> { Set((try? FileManager.default.contentsOfDirectory(atPath: tmp.path)) ?? []) }
+
+    @Test func renameMovesBothFilesAndCannotOverwriteAnother() throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = WorkflowStore(folder: tmp)
+        var w = Workflow.starter(name: "A")
+        try store.save(w)
+        try store.save(Workflow.starter(name: "B"))
+        w.name = "C"
+        try store.save(w, replacing: "A")
+        #expect(files() == ["B.pfflow", "B.md", "C.pfflow", "C.md"])
+
+        w.name = "B"
+        #expect(throws: WorkflowError.self) { try store.save(w, replacing: "C") }
+        #expect(files() == ["B.pfflow", "B.md", "C.pfflow", "C.md"])   // nothing lost
+    }
+
+    @Test func newWorkflowCannotTakeAnExistingNameButResavingItselfIsFine() throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = WorkflowStore(folder: tmp)
+        var w = Workflow.starter(name: "A")
+        try store.save(w)
+        #expect(throws: WorkflowError.self) { try store.save(Workflow.starter(name: "A")) }
+        w.verify = .paranoid
+        try store.save(w, replacing: "A")
+        #expect(try store.load("A").verify == .paranoid)
+    }
+
+    @Test func deleteRemovesBothFiles() throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = WorkflowStore(folder: tmp)
+        try store.save(Workflow.starter(name: "A"))
+        try store.delete("A")
+        #expect(files().isEmpty)
+    }
+}

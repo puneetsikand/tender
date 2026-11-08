@@ -166,7 +166,7 @@ public struct Planner: Sendable {
             issues.append(.init(severity: .info, message: "capture times without a time-zone offset were read as \(zone.identifier) (the Mac's zone); set timeZone in the workflow to pin it"))
         }
         if !unrouted.isEmpty {
-            issues.append(.init(severity: .warning, message: "\(unrouted.count) file(s) matched no route and stay on the card: "
+            issues.append(.init(severity: .warning, message: "\(unrouted.count) file(s) matched no route and won't be copied: "
                                 + unrouted.prefix(5).map(\.relativePath).joined(separator: ", ") + (unrouted.count > 5 ? " …" : "")))
         }
         if entries.isEmpty { issues.append(.init(severity: .error, message: "nothing to copy")) }

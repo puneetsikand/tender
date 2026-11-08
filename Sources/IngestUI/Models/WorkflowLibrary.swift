@@ -28,4 +28,45 @@ public final class WorkflowLibrary {
         try store.save(w)
         reload()
     }
+
+    // MARK: Editing
+
+    /// Open editor drafts by the workflow's saved name, so unsaved edits survive switching views.
+    private var drafts: [String: WorkflowDraft] = [:]
+
+    public func draft(for name: String) -> WorkflowDraft? {
+        if let d = drafts[name] { return d }
+        guard let w = workflow(named: name) else { return nil }
+        let d = WorkflowDraft(saved: w)
+        drafts[name] = d
+        return d
+    }
+
+    /// Saves a draft (renaming its files if the name changed). Returns the saved name.
+    @discardableResult
+    func commit(_ draft: WorkflowDraft) throws -> String {
+        let oldName = draft.savedName
+        try store.save(draft.workflow, replacing: oldName)
+        drafts[oldName] = nil
+        drafts[draft.workflow.name] = draft
+        draft.markSaved()
+        reload()
+        return draft.workflow.name
+    }
+
+    func delete(_ draft: WorkflowDraft) throws {
+        try store.delete(draft.savedName)
+        drafts[draft.savedName] = nil
+        reload()
+    }
+
+    /// Creates and saves a new workflow from the starter, with a unique name.
+    func createWorkflow() throws -> String {
+        var name = "New workflow"
+        var n = 2
+        while workflows.contains(where: { $0.name == name }) { name = "New workflow \(n)"; n += 1 }
+        try store.save(Workflow.starter(name: name))
+        reload()
+        return name
+    }
 }

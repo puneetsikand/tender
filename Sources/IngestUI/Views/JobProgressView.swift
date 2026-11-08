@@ -27,7 +27,7 @@ struct JobProgressView: View {
 
     @ViewBuilder private var status: some View {
         if let reason = job.interruption {
-            Label("Import interrupted: \(reason)", systemImage: "exclamationmark.octagon.fill")
+            Label("Copy interrupted: \(reason)", systemImage: "exclamationmark.octagon.fill")
                 .font(.headline).foregroundStyle(.red)
         } else if let s = job.summary {
             if s.allSucceeded {
@@ -39,7 +39,7 @@ struct JobProgressView: View {
                     .font(.headline).foregroundStyle(.orange)
             }
         } else {
-            Label("Importing with \(job.job.workflowName ?? "workflow")", systemImage: "square.and.arrow.down")
+            Label("Copying with \(job.job.workflowName ?? "workflow")", systemImage: "doc.on.doc")
                 .font(.headline)
         }
     }
