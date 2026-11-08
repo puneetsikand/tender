@@ -12,7 +12,13 @@ struct CardDetailView: View {
             header
             Divider()
             if let job = session.job {
+                if let reason = session.autoRunReason {
+                    Label(reason, systemImage: "bolt.fill")
+                        .font(.callout).padding(.horizontal, 16).padding(.top, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 JobProgressView(job: job)
+                CardDeletionBar(session: session)
             } else {
                 planArea
             }
@@ -63,15 +69,23 @@ struct CardDetailView: View {
             }
             .controlSize(.large)
             .disabled(session.job?.isRunning == true || session.removed)
-            Button {
-                session.startImport()
-            } label: {
-                Label(session.job?.isRunning == true ? "Copying…" : copyTitle, systemImage: "doc.on.doc")
-                    .frame(minWidth: 140)
+            if session.job?.isRunning == true {
+                Button(role: .cancel) {
+                    session.cancelImport()
+                } label: {
+                    Label("Cancel Copy", systemImage: "stop.fill").frame(minWidth: 140)
+                }
+                .controlSize(.large)
+            } else {
+                Button {
+                    session.startImport()
+                } label: {
+                    Label(copyTitle, systemImage: "doc.on.doc").frame(minWidth: 140)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(!session.canImport)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(!session.canImport)
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
     }
@@ -102,6 +116,9 @@ struct CardDetailView: View {
                 }
                 if let id = session.hardwareID {
                     Text("Card ID \(id.key)").font(.caption.monospaced()).foregroundStyle(.tertiary).textSelection(.enabled)
+                }
+                if let note = session.autoRunNote {
+                    Label(note, systemImage: "bolt.slash").foregroundStyle(.secondary)
                 }
                 if session.removed {
                     Label("The card was removed.", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)

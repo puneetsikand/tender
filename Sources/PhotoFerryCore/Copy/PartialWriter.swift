@@ -9,6 +9,8 @@ import System
 final class PartialWriter: @unchecked Sendable {
     let finalURL: URL
     let partialURL: URL
+    /// On a name clash at commit, take the next free " 2", " 3" … name instead of failing.
+    let keepBothOnClash: Bool
     private var fd: FileDescriptor?
     private(set) var failure: String?
 
@@ -16,16 +18,14 @@ final class PartialWriter: @unchecked Sendable {
         finalURL.deletingLastPathComponent().appendingPathComponent(".\(finalURL.lastPathComponent).pfpartial")
     }
 
-    init(finalURL: URL, expectedSize: Int64) {
+    init(finalURL: URL, expectedSize: Int64, keepBothOnClash: Bool = false, partialTag: String = "") {
         self.finalURL = finalURL
-        partialURL = Self.partialURL(for: finalURL)
+        self.keepBothOnClash = keepBothOnClash
+        let p = Self.partialURL(for: finalURL)
+        partialURL = partialTag.isEmpty ? p : p.deletingPathExtension().appendingPathExtension("\(partialTag).pfpartial")
         do {
             let fm = FileManager.default
             try fm.createDirectory(at: finalURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if fm.fileExists(atPath: finalURL.path) {
-                failure = "destination already exists"
-                return
-            }
             // A partial with our name is always ours, left by an interrupted run.
             try? fm.removeItem(at: partialURL)
             let fd = try FileDescriptor.open(FilePath(partialURL.path), .writeOnly,
@@ -64,25 +64,42 @@ final class PartialWriter: @unchecked Sendable {
         fail(reason)
     }
 
-    /// Renames a sealed, verified partial to its final name. Never replaces an existing file.
+    /// Renames a sealed, verified partial to its final name. Never replaces an existing file:
+    /// on a clash it fails, or with `keepBothOnClash` takes the next free " 2", " 3" … name.
     func commit(verification: DestinationVerification, modificationDate: Date?) -> DestinationOutcome {
         if let failure { abandon(); return .failed(finalURL, reason: failure) }
-        // RENAME_EXCL isn't supported everywhere (some network filesystems), so fall back to
-        // check-then-rename.
-        var ok = renamex_np(partialURL.path, finalURL.path, UInt32(RENAME_EXCL)) == 0
-        if !ok, errno == ENOTSUP || errno == EINVAL {
-            ok = !FileManager.default.fileExists(atPath: finalURL.path)
-                && rename(partialURL.path, finalURL.path) == 0
-        }
-        guard ok else {
-            let reason = errno == EEXIST ? "destination already exists" : "rename: errno \(errno)"
-            abandon()
-            return .failed(finalURL, reason: reason)
+        var target = finalURL
+        var n = 1
+        while true {
+            if Self.renameExclusive(partialURL, target) { break }
+            guard errno == EEXIST, keepBothOnClash, n < 1000 else {
+                let reason = errno == EEXIST ? "a different file with this name already exists" : "rename: errno \(errno)"
+                abandon()
+                return .failed(finalURL, reason: reason)
+            }
+            n += 1
+            target = Self.suffixed(finalURL, n)
         }
         if let modificationDate {
-            try? FileManager.default.setAttributes([.modificationDate: modificationDate], ofItemAtPath: finalURL.path)
+            try? FileManager.default.setAttributes([.modificationDate: modificationDate], ofItemAtPath: target.path)
         }
-        return .written(finalURL, verification)
+        return .written(target, verification)
+    }
+
+    /// `SDIM0199.DNG` → `SDIM0199 2.DNG`.
+    static func suffixed(_ url: URL, _ n: Int) -> URL {
+        let ext = url.pathExtension
+        let stem = url.deletingPathExtension().lastPathComponent
+        return url.deletingLastPathComponent().appendingPathComponent(ext.isEmpty ? "\(stem) \(n)" : "\(stem) \(n).\(ext)")
+    }
+
+    /// Rename that never replaces. RENAME_EXCL isn't supported everywhere (some network
+    /// filesystems), so fall back to check-then-rename there. Sets errno = EEXIST on a clash.
+    private static func renameExclusive(_ from: URL, _ to: URL) -> Bool {
+        if renamex_np(from.path, to.path, UInt32(RENAME_EXCL)) == 0 { return true }
+        guard errno == ENOTSUP || errno == EINVAL else { return false }
+        if FileManager.default.fileExists(atPath: to.path) { errno = EEXIST; return false }
+        return rename(from.path, to.path) == 0
     }
 
     /// Closes and deletes the partial file.

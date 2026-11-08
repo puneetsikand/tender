@@ -265,3 +265,74 @@ import Testing
         #expect(files().isEmpty)
     }
 }
+
+@Suite struct SchemaV2Tests {
+    @Test func v1FileLoadsWithV2Defaults() throws {
+        // A workflow exactly as M4/M6 wrote it (schema v1, no v2 keys).
+        let v1 = """
+        {"destinations":[{"id":"library","name":"Photo library","root":"~/Pictures/PhotoFerry"}],
+         "extensionCase":"original","name":"Old","routes":[{"destinations":["library"],"fileName":"{orig}",
+         "folder":"{date}","id":"raw","match":{"kinds":["raw"]},"name":"RAW","skip":false}],
+         "schemaVersion":1,"sequenceStart":1,"verify":"hash"}
+        """
+        let w = try WorkflowStore.decode(Data(v1.utf8))
+        #expect(w.schemaVersion == 1 && w.onClash == .keepBoth && w.skipPreviouslyCopied)
+        #expect(w.afterCopy == Workflow.AfterCopy() && !w.autoRun.isEnabled)
+        try Planner.validate(w)
+        // Saving writes the new fields (and the app writes v2 for new workflows).
+        let text = String(decoding: try WorkflowStore.encode(w), as: UTF8.self)
+        #expect(text.contains("\"onClash\" : \"keepBoth\"") && text.contains("\"autoRun\""))
+        #expect(Workflow.starter().schemaVersion == 2)
+    }
+}
+
+@Suite struct PreviouslyCopiedTests {
+    let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("pf-again-\(UUID().uuidString)")
+
+    @Test func reinsertedCardPlansOnlyNewFilesAndSurvivesMovedCopies() async throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let card = tmp.appendingPathComponent("card/DCIM/100SIGMA")
+        try FileManager.default.createDirectory(at: card, withIntermediateDirectories: true)
+        for n in 1...3 { try Data(repeating: UInt8(n), count: 50_000 * n).write(to: card.appendingPathComponent("SDIM000\(n).DNG")) }
+        let ledger = try Ledger(url: tmp.appendingPathComponent("ledger.sqlite"))
+        var w = Workflow.starter(root: tmp.appendingPathComponent("lib").path)
+        w.routes[0].folder = "RAW"
+        let planner = try Planner(w)
+        let scan = { try CardScanner().scan(tmp.appendingPathComponent("card")) }
+
+        // First run copies everything.
+        let first = await planner.plan(try scan(), cardLabel: nil, ledger: ledger)
+        #expect(first.entries.count == 3 && first.alreadyCopied.isEmpty)
+        for await e in JobExecutor(ledger: ledger).run(first.job(source: JobSource(root: tmp))) { _ = e }
+
+        // A new photo appears on the card: only it is planned.
+        try Data(repeating: 9, count: 70_000).write(to: card.appendingPathComponent("SDIM0004.DNG"))
+        let second = await planner.plan(try scan(), cardLabel: nil, ledger: ledger)
+        #expect(second.entries.map(\.file.fileName) == ["SDIM0004.DNG"])
+        #expect(second.alreadyCopied.count == 3 && second.canRun)
+        #expect(second.issues.contains { $0.message.contains("only the 1 new file(s) will be copied") })
+
+        // A copy that was deleted from the destination is planned again.
+        try FileManager.default.removeItem(at: tmp.appendingPathComponent("lib/RAW/SDIM0002.DNG"))
+        let third = await planner.plan(try scan(), cardLabel: nil, ledger: ledger)
+        #expect(Set(third.entries.map(\.file.fileName)) == ["SDIM0002.DNG", "SDIM0004.DNG"])
+
+        // Turned off, everything is planned (and the engine then skips identical files by hash).
+        w.skipPreviouslyCopied = false
+        #expect(await try Planner(w).plan(try scan(), cardLabel: nil, ledger: ledger).entries.count == 4)
+    }
+
+    @Test func allAlreadyCopiedIsNotAnErrorButCannotRun() async throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let card = tmp.appendingPathComponent("card/DCIM/100SIGMA")
+        try FileManager.default.createDirectory(at: card, withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 1000).write(to: card.appendingPathComponent("A.DNG"))
+        let ledger = try Ledger(url: tmp.appendingPathComponent("ledger.sqlite"))
+        let planner = try Planner(Workflow.starter(root: tmp.appendingPathComponent("lib").path))
+        let files = try CardScanner().scan(tmp.appendingPathComponent("card"))
+        for await e in JobExecutor(ledger: ledger).run(await planner.plan(files, cardLabel: nil, ledger: ledger).job(source: JobSource(root: tmp))) { _ = e }
+        let again = await planner.plan(files, cardLabel: nil, ledger: ledger)
+        #expect(!again.canRun && again.entries.isEmpty && again.alreadyCopied.count == 1)
+        #expect(!again.issues.contains { $0.severity == .error })
+    }
+}

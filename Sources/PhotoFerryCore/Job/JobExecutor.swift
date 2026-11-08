@@ -23,7 +23,7 @@ public struct JobExecutor: Sendable {
         do { try ledger?.beginJob(job) } catch { out.yield(.notice("ledger: could not record job start: \(error)")) }
 
         var finished = false
-        for await event in CopyEngine(options: job.options).run(job.requests) {
+        for await event in CopyEngine(options: job.options).run(job.requests, destinationRoots: job.destinationRoots) {
             switch event {
             case .fileFinished(_, let result):
                 do { try ledger?.recordFile(job: job.id, result) } catch { out.yield(.notice("ledger: \(error)")) }

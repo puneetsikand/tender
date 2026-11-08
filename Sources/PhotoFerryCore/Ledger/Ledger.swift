@@ -58,7 +58,7 @@ public final class Ledger: Sendable {
                 t.autoIncrementedPrimaryKey("id")
                 t.column("fileId", .integer).notNull().indexed().references("file", onDelete: .cascade)
                 t.column("path", .text).notNull().indexed()
-                t.column("outcome", .text).notNull()         // written | failed
+                t.column("outcome", .text).notNull()         // written | present (identical file already there) | failed
                 t.column("reason", .text)
                 t.column("verifyMode", .text)
                 t.column("verifyPath", .text)                // device | server | possiblyCached | notRead
@@ -75,6 +75,9 @@ public final class Ledger: Sendable {
                 t.add(column: "bodySerial", .text).indexed()
                 t.add(column: "lensModel", .text)
             }
+        }
+        m.registerMigration("v3: deleted from source") { db in
+            try db.alter(table: "file") { t in t.add(column: "deletedFromSourceAt", .datetime) }
         }
         return m
     }
@@ -112,11 +115,12 @@ public final class Ledger: Sendable {
             let fileId = db.lastInsertedRowID
             for d in r.destinations {
                 switch d {
-                case let .written(url, v):
+                case let .written(url, v), let .alreadyPresent(url, v):
                     try db.execute(sql: """
                         INSERT INTO copy (fileId, path, outcome, verifyMode, verifyPath, destinationSha256)
-                        VALUES (?, ?, 'written', ?, ?, ?)
-                        """, arguments: [fileId, url.path, v.mode.rawValue, v.path.rawValue, v.destinationSHA256])
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """, arguments: [fileId, url.path, d.isWritten ? "written" : "present", v.mode.rawValue,
+                                         v.path.rawValue, v.destinationSHA256])
                 case let .failed(url, reason):
                     try db.execute(sql: "INSERT INTO copy (fileId, path, outcome, reason) VALUES (?, ?, 'failed', ?)",
                                    arguments: [fileId, url.path, reason])
@@ -132,6 +136,16 @@ public final class Ledger: Sendable {
             for (root, manifest) in manifests {
                 try db.execute(sql: "UPDATE jobDestination SET manifestPath = ? WHERE jobId = ? AND root = ?",
                                arguments: [manifest.path, job.uuidString, root.path])
+            }
+        }
+    }
+
+    public func recordDeletedFromSource(job: UUID, relativePaths: [String], at date: Date = .now) throws {
+        guard !relativePaths.isEmpty else { return }
+        try pool.write { db in
+            for p in relativePaths {
+                try db.execute(sql: "UPDATE file SET deletedFromSourceAt = ? WHERE jobId = ? AND relativePath = ?",
+                               arguments: [date, job.uuidString, p])
             }
         }
     }
@@ -160,12 +174,41 @@ public final class Ledger: Sendable {
         }
     }
 
+    /// Of the given (card file, destination path) pairs, the destination paths that already hold a
+    /// verified copy of that same card file (same relative path, size and modification date)
+    /// according to the ledger *and* still exist with that size.
+    public func previouslyCopied(_ checks: [(source: SourceFile, destination: URL)]) throws -> Set<String> {
+        try pool.read { db in
+            var found = Set<String>()
+            let statement = try db.makeStatement(sql: """
+                SELECT f.modifiedAt FROM copy c JOIN file f ON f.id = c.fileId
+                WHERE c.path = ? AND c.outcome IN ('written', 'present') AND f.relativePath = ? AND f.size = ?
+                """)
+            for (source, destination) in checks {
+                let dates = try Date?.fetchAll(statement, arguments: [destination.path, source.relativePath, source.size])
+                guard dates.contains(where: { Self.sameInstant($0, source.modificationDate) }) else { continue }
+                let size = (try? FileManager.default.attributesOfItem(atPath: destination.path))?[.size] as? Int64
+                if size == source.size { found.insert(destination.path) }
+            }
+            return found
+        }
+    }
+
+    /// Dates round-trip through SQLite with millisecond precision.
+    static func sameInstant(_ a: Date?, _ b: Date?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): true
+        case let (a?, b?): abs(a.timeIntervalSince(b)) < 0.002
+        default: false
+        }
+    }
+
     /// Verified copies of content with this SHA-256, anywhere, ever. Basis for duplicate checks (PLAN §6).
     public func verifiedCopies(sha256: String) throws -> [String] {
         try pool.read { db in
             try String.fetchAll(db, sql: """
                 SELECT c.path FROM copy c JOIN file f ON f.id = c.fileId
-                WHERE f.sha256 = ? AND c.outcome = 'written' ORDER BY c.id
+                WHERE f.sha256 = ? AND c.outcome IN ('written', 'present') ORDER BY c.id
                 """, arguments: [sha256])
         }
     }

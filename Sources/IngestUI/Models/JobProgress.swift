@@ -9,7 +9,8 @@ public final class JobProgress {
         case queued
         case copying(bytes: Int64)
         case verifying
-        case done(DestinationVerification?)
+        /// `alreadyPresent`: every destination already had an identical file; nothing was written.
+        case done(DestinationVerification?, alreadyPresent: Bool)
         case failed(String)
     }
 
@@ -67,8 +68,8 @@ public final class JobProgress {
             bytesDone += result.bytesRead - perFile[i, default: 0]
             perFile[i] = result.bytesRead
             if result.succeeded {
-                let v = result.destinations.compactMap { if case .written(_, let v) = $0 { v } else { nil } }.first
-                rows[i].state = .done(v)
+                let v = result.destinations.compactMap(\.verification).first
+                rows[i].state = .done(v, alreadyPresent: !result.destinations.contains(where: \.isWritten))
             } else {
                 let reason = result.sourceError
                     ?? result.destinations.compactMap { if case .failed(let u, let r) = $0 { "\(u.lastPathComponent): \(r)" } else { nil } }.first
@@ -84,6 +85,14 @@ public final class JobProgress {
         case .notice(let text):
             notices.append(text)
         }
+    }
+
+    public private(set) var cancelled = false
+
+    func markCancelled() {
+        guard isRunning else { return }
+        cancelled = true
+        apply(.interrupted(reason: "cancelled"))
     }
 
     private func isSettled(_ s: FileState) -> Bool {

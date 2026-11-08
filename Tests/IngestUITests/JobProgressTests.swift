@@ -35,7 +35,7 @@ import Testing
         p.apply(.verifying(index: 0))
         #expect(p.rows[0].state == .verifying)
         p.apply(.fileFinished(index: 0, result(0, ok: true)))
-        guard case .done(let v) = p.rows[0].state else { Issue.record("not done"); return }
+        guard case .done(let v, _) = p.rows[0].state else { Issue.record("not done"); return }
         #expect(v?.path == .device)
 
         // A file that finishes without progress events still counts its full size once.
@@ -59,5 +59,19 @@ import Testing
         guard case .done = p.rows[0].state else { Issue.record("finished file must stay done"); return }
         guard case .failed(let why) = p.rows[1].state else { Issue.record("unsettled file must fail"); return }
         #expect(why.contains("copy service connection lost"))
+    }
+}
+
+@MainActor @Suite struct JobCancelTests {
+    @Test func cancellingMarksUnfinishedFilesNotCopied() {
+        let f = SourceFile(url: URL(fileURLWithPath: "/c/A.DNG"), relativePath: "A.DNG", size: 10, modificationDate: nil, kind: .raw)
+        let job = CopyJob(source: JobSource(root: URL(fileURLWithPath: "/c")), destinationRoots: [],
+                          requests: [CopyRequest(source: f, destinations: [URL(fileURLWithPath: "/l/A.DNG")])], options: CopyOptions())
+        let p = JobProgress(job: job, runnerName: "t")
+        p.apply(.fileStarted(index: 0, f))
+        p.markCancelled()
+        #expect(p.cancelled && !p.isRunning)
+        guard case .failed(let why) = p.rows[0].state else { Issue.record("expected failed"); return }
+        #expect(why == "not copied: cancelled")
     }
 }

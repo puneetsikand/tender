@@ -23,8 +23,8 @@ public enum ManifestWriter {
             var lines: [String] = []
             for result in summary.results {
                 guard let hash = result.sourceSHA256 else { continue }
-                for case let .written(url, _) in result.destinations {
-                    let path = url.standardizedFileURL.path
+                for d in result.destinations where d.isSatisfied {
+                    let path = d.url.standardizedFileURL.path
                     guard path.hasPrefix(base), !path.contains("\n") else { continue }
                     lines.append("\(hash)  \(path.dropFirst(base.count))")
                 }

@@ -60,6 +60,8 @@ public enum DevSnapshots {
             .background(Color(nsColor: .windowBackgroundColor)))
         _ = try await waitFor("the editor preview", timeout: 20) { draft.preview }
         try await snap(window, outputDir.appending(path: "5-editor.png"))
+        draft.selection = .settings
+        try await snap(window, outputDir.appending(path: "6-settings.png"))
     }
 
     struct Timeout: Error, CustomStringConvertible {

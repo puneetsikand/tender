@@ -69,7 +69,8 @@ struct JobProgressView: View {
         case .copying(let b):
             Text("Copying \(r.request.source.size > 0 ? Int(Double(b) / Double(r.request.source.size) * 100) : 0)%").monospacedDigit()
         case .verifying: Text("Verifying")
-        case .done(let v): Text(verifiedText(v)).foregroundStyle(.secondary)
+        case .done(let v, let present):
+            Text(present ? "Already there (identical, not copied again)" : verifiedText(v)).foregroundStyle(.secondary)
         case .failed(let reason): Text(reason).foregroundStyle(.red).lineLimit(2)
         }
     }

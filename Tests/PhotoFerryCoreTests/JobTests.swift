@@ -6,7 +6,7 @@ import Testing
 @Suite struct JobExecutorTests {
     let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("pf-job-\(UUID().uuidString)")
 
-    func makeJob(roots: [String]) throws -> CopyJob {
+    func makeJob(roots: [String], onClash: ClashPolicy = .keepBoth) throws -> CopyJob {
         let card = tmp.appendingPathComponent("card")
         var requests: [CopyRequest] = []
         for (i, name) in ["SDIM0001.DNG", "SDIM0001.JPG", "SDIM0002.DNG"].enumerated() {
@@ -20,7 +20,7 @@ import Testing
         }
         return CopyJob(source: JobSource(root: card, volumeLabel: "NO NAME", cardKey: "sd:03-5344-SK32G-8.5-4984c954"),
                        destinationRoots: roots.map { tmp.appendingPathComponent($0) }, requests: requests,
-                       options: CopyOptions(chunkSize: 1 << 16))
+                       options: CopyOptions(chunkSize: 1 << 16, onClash: onClash))
     }
 
     func drain(_ stream: AsyncStream<CopyEvent>) async -> (CopySummary?, [String]) {
@@ -71,8 +71,8 @@ import Testing
     @Test func failedCopiesAreRecordedAndLeftOutOfTheManifest() async throws {
         defer { try? FileManager.default.removeItem(at: tmp) }
         let ledger = try Ledger(url: tmp.appendingPathComponent("ledger.sqlite"))
-        let job = try makeJob(roots: ["Mac"])
-        // Occupy one destination so it fails.
+        let job = try makeJob(roots: ["Mac"], onClash: .fail)
+        // Occupy one destination with a different file so it fails.
         let taken = job.requests[0].destinations[0]
         try FileManager.default.createDirectory(at: taken.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("other".utf8).write(to: taken)

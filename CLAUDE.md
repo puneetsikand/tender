@@ -39,6 +39,11 @@ scripts/package.sh               # dist/PhotoFerry.app
 - No Xcode project: SwiftPM + `scripts/package.sh`. Any XPC service (M2) is bundled by the script.
 - Never write anything to a source card except an explicitly confirmed delete (PLAN §7, §3.2).
 - Guard every "all verified" check against empty sets.
+- Nothing is ever overwritten: identical files are skipped (`.alreadyPresent`), different ones get `onClash`.
+- Deleting from a card only via `CardCleaner`, only after `allSucceeded`, only behind an explicit confirmation;
+  auto-run never deletes.
+- Every write goes through `DestinationGuard` (pass `destinationRoots`): an unmounted drive or share must fail,
+  never silently become a folder on the boot disk.
 - A copy never gets its final name before it has passed verification. Never report a verify read as `device` unless
   `mincore` confirmed the pages were evicted.
 - Benchmarks after any `diff`/`cp` of the same source are invalid: the file cache serves the reads (it showed 2.4 GB/s

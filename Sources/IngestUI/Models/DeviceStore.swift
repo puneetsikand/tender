@@ -10,6 +10,8 @@ public final class DeviceStore {
     public let library: WorkflowLibrary
     public let history: HistoryStore
     private var started = false
+    /// Volumes mounted before the app started watching; they never auto-run.
+    private var presentAtLaunch: Set<String> = []
 
     public init(library: WorkflowLibrary = WorkflowLibrary(), history: HistoryStore = HistoryStore()) {
         self.library = library
@@ -19,6 +21,8 @@ public final class DeviceStore {
     public func start() {
         guard !started else { return }
         started = true
+        let mounted = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: []) ?? []
+        presentAtLaunch = Set(mounted.map(\.standardizedFileURL.path))
         Task { for await e in VolumeMonitor.events() { handle(e) } }
         Task {
             for await e in CameraMonitor.events() {
@@ -35,11 +39,15 @@ public final class DeviceStore {
         case .mounted(let v):
             guard !v.isNetwork, let root = v.mountPoint, !cards.contains(where: { $0.id == v.id }),
                   CardScanner().looksLikeCard(root) else { return }
-            let session = CardSession(volume: v, root: root, library: library) { [weak self] in self?.history.reload() }
+            let live = !presentAtLaunch.contains(root.standardizedFileURL.path)
+            let session = CardSession(volume: v, root: root, library: library, ledger: history.ledger, insertedLive: live) { [weak self] in
+                self?.history.reload()
+            }
             cards.append(session)
             Task { await session.scan() }
         case .unmounted(let id):
             guard let session = cards.first(where: { $0.id == id }) else { return }
+            presentAtLaunch.remove(session.root.standardizedFileURL.path)   // a re-insert is a live insert
             if session.job?.isRunning == true {
                 session.removed = true      // keep it on screen: the job will report what didn't copy
             } else {
@@ -57,7 +65,7 @@ public final class DeviceStore {
 public final class HistoryStore {
     public private(set) var jobs: [JobRecord] = []
     public private(set) var error: String?
-    private let ledger: Ledger?
+    let ledger: Ledger?
 
     public init(ledger: Ledger? = try? Ledger()) {
         self.ledger = ledger

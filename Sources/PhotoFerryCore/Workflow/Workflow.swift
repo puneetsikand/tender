@@ -5,7 +5,9 @@ import Foundation
 /// Stored as JSON (`*.pfflow`). Routes are tried in order and the first match takes the file.
 /// Sidecars (XMP, THM …) follow their item's primary file unless a route matches them explicitly.
 public struct Workflow: Sendable, Hashable, Codable {
-    public static let currentSchemaVersion = 1
+    /// v2 (2026-11-08) added onClash, skipPreviouslyCopied, afterCopy, autoRun. v1 files load
+    /// with those at their defaults.
+    public static let currentSchemaVersion = 2
 
     public var schemaVersion: Int
     public var name: String
@@ -18,10 +20,23 @@ public struct Workflow: Sendable, Hashable, Codable {
     /// First value of `{seq}` in each job.
     public var sequenceStart: Int
     public var extensionCase: ExtensionCase
+    /// A *different* file already has the planned name. Identical files are always skipped.
+    public var onClash: ClashPolicy
+    /// Leave out files the ledger shows were already copied to the same place and are still there,
+    /// so a re-inserted card copies only what's new (and an interrupted copy resumes).
+    public var skipPreviouslyCopied: Bool
+    public var afterCopy: AfterCopy
+    public var autoRun: AutoRun
 
     public init(name: String, timeZone: String? = nil, verify: VerifyMode = .hash, destinations: [Destination],
-                routes: [Route], sequenceStart: Int = 1, extensionCase: ExtensionCase = .original) {
+                routes: [Route], sequenceStart: Int = 1, extensionCase: ExtensionCase = .original,
+                onClash: ClashPolicy = .keepBoth, skipPreviouslyCopied: Bool = true,
+                afterCopy: AfterCopy = AfterCopy(), autoRun: AutoRun = AutoRun()) {
         schemaVersion = Self.currentSchemaVersion
+        self.onClash = onClash
+        self.skipPreviouslyCopied = skipPreviouslyCopied
+        self.afterCopy = afterCopy
+        self.autoRun = autoRun
         self.name = name
         self.timeZone = timeZone
         self.verify = verify
@@ -105,6 +120,51 @@ public struct Workflow: Sendable, Hashable, Codable {
 
     public enum ExtensionCase: String, Sendable, Hashable, Codable {
         case original, lower, upper
+    }
+
+    /// Runs after a job in which every file verified at every destination.
+    public struct AfterCopy: Sendable, Hashable, Codable {
+        public var eject: Bool
+        public var notify: Bool
+        public init(eject: Bool = false, notify: Bool = true) {
+            self.eject = eject
+            self.notify = notify
+        }
+    }
+
+    /// Start this workflow by itself when a matching card is inserted (PLAN §3.2). Matching is on
+    /// the card's hardware ID or a camera body serial found on it, never on the volume name.
+    /// Auto-run never deletes from the card.
+    public struct AutoRun: Sendable, Hashable, Codable {
+        public var cardKeys: [String]
+        public var bodySerials: [String]
+        public init(cardKeys: [String] = [], bodySerials: [String] = []) {
+            self.cardKeys = cardKeys
+            self.bodySerials = bodySerials
+        }
+        public var isEnabled: Bool { !cardKeys.isEmpty || !bodySerials.isEmpty }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, name, timeZone, verify, destinations, routes, sequenceStart, extensionCase
+        case onClash, skipPreviouslyCopied, afterCopy, autoRun
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decode(Int.self, forKey: .schemaVersion)
+        name = try c.decode(String.self, forKey: .name)
+        timeZone = try c.decodeIfPresent(String.self, forKey: .timeZone)
+        verify = try c.decode(VerifyMode.self, forKey: .verify)
+        destinations = try c.decode([Destination].self, forKey: .destinations)
+        routes = try c.decode([Route].self, forKey: .routes)
+        sequenceStart = try c.decode(Int.self, forKey: .sequenceStart)
+        extensionCase = try c.decode(ExtensionCase.self, forKey: .extensionCase)
+        // v2 fields; absent in v1 files.
+        onClash = try c.decodeIfPresent(ClashPolicy.self, forKey: .onClash) ?? .keepBoth
+        skipPreviouslyCopied = try c.decodeIfPresent(Bool.self, forKey: .skipPreviouslyCopied) ?? true
+        afterCopy = try c.decodeIfPresent(AfterCopy.self, forKey: .afterCopy) ?? AfterCopy()
+        autoRun = try c.decodeIfPresent(AutoRun.self, forKey: .autoRun) ?? AutoRun()
     }
 }
 

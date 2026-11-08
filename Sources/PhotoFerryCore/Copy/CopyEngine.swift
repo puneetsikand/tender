@@ -27,11 +27,14 @@ public struct CopyEngine: Sendable {
     }
 
     /// Runs the job. Cancelling the consuming task stops it and removes partial files.
-    public func run(_ requests: [CopyRequest]) -> AsyncStream<CopyEvent> {
+    /// `destinationRoots` are guarded: a root that disappears or changes volume mid-job fails
+    /// its remaining copies instead of writing to whatever folder now has that path.
+    public func run(_ requests: [CopyRequest], destinationRoots: [URL] = []) -> AsyncStream<CopyEvent> {
         AsyncStream { continuation in
             let task = Task {
+                let guard_ = DestinationGuard(roots: destinationRoots)
                 await withTaskExecutorPreference(BlockingIOExecutor.shared) {
-                    await self.runAll(requests, continuation)
+                    await self.runAll(requests, guard_, continuation)
                 }
                 continuation.finish()
             }
@@ -39,7 +42,7 @@ public struct CopyEngine: Sendable {
         }
     }
 
-    private func runAll(_ requests: [CopyRequest], _ out: AsyncStream<CopyEvent>.Continuation) async {
+    private func runAll(_ requests: [CopyRequest], _ guard_: DestinationGuard, _ out: AsyncStream<CopyEvent>.Continuation) async {
         let clock = ContinuousClock()
         let start = clock.now
         var results = [FileCopyResult?](repeating: nil, count: requests.count)
@@ -52,7 +55,7 @@ public struct CopyEngine: Sendable {
                 next += 1
                 group.addTask {
                     out.yield(.fileStarted(index: index, requests[index].source))
-                    return (index, await copy(requests[index], index: index, out))
+                    return (index, await copy(requests[index], index: index, guard_, out))
                 }
             }
             for _ in 0..<max(1, options.filesInFlight) { launch() }
@@ -70,7 +73,13 @@ public struct CopyEngine: Sendable {
     }
 
     /// Copies and verifies one file. Runs on `BlockingIOExecutor` threads.
-    func copy(_ request: CopyRequest, index: Int, _ out: AsyncStream<CopyEvent>.Continuation) async -> FileCopyResult {
+    ///
+    /// Destinations that already hold a file with the planned name are handled without ever
+    /// overwriting: a same-size file is compared by SHA-256 once the source has been read
+    /// (identical → `.alreadyPresent`); a different file gets the clash policy (keep both with
+    /// a " 2" suffix, or fail that copy).
+    func copy(_ request: CopyRequest, index: Int, _ guard_: DestinationGuard = DestinationGuard(roots: []),
+              _ out: AsyncStream<CopyEvent>.Continuation) async -> FileCopyResult {
         func sourceFailure(_ reason: String, read: Int64 = 0, writers: [PartialWriter] = []) -> FileCopyResult {
             writers.forEach { $0.abandon() }
             return FileCopyResult(request: request, sourceSHA256: nil, bytesRead: read, sourceError: reason,
@@ -78,19 +87,32 @@ public struct CopyEngine: Sendable {
         }
 
         let sourcePath = request.source.url.path
+        let size = request.source.size
+        let keepBoth = options.onClash == .keepBoth
         // Make the read come from the card, not from pages another program left cached.
         PageCache.evict(sourcePath)
 
-        let writers = request.destinations.map { PartialWriter(finalURL: $0, expectedSize: request.source.size) }
+        enum Slot {
+            case write(PartialWriter)
+            case candidate(URL)          // same name and size already there; compare after reading
+            case done(DestinationOutcome)
+        }
+        var slots: [Slot] = request.destinations.map { url in
+            if let problem = guard_.problem(for: url) { return .done(.failed(url, reason: problem)) }
+            guard let existing = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int64 else {
+                return .write(PartialWriter(finalURL: url, expectedSize: size, keepBothOnClash: keepBoth))
+            }
+            if existing == size { return .candidate(url) }
+            return keepBoth ? .write(PartialWriter(finalURL: url, expectedSize: size, keepBothOnClash: true))
+                            : .done(.failed(url, reason: "a different file with this name already exists"))
+        }
+        let writers = slots.compactMap { slot -> PartialWriter? in if case .write(let w) = slot { w } else { nil } }
+
+        // One read of the source, written to every destination that needs a copy.
         let sourceHash: String
         let total: Int64
         do {
-            (sourceHash, total) = try await readSource(sourcePath, index: index, out) { chunk in
-                let live = writers.filter { $0.failure == nil }
-                await withTaskGroup(of: Void.self) { group in
-                    for writer in live { group.addTask { writer.write(chunk) } }
-                }
-            }
+            (sourceHash, total) = try await readSource(sourcePath, index: index, out) { chunk in await Self.fanOut(chunk, to: writers) }
         } catch is CancellationError {
             return sourceFailure("cancelled", writers: writers)
         } catch {
@@ -111,6 +133,68 @@ public struct CopyEngine: Sendable {
             }
         }
 
+        var committed = await verifyAndCommit(writers, sealed: sealed, sourcePath: sourcePath, sourceHash: sourceHash,
+                                              total: total, modificationDate: request.source.modificationDate)
+
+        // Same name and size already at the destination: identical, or in the way?
+        var inTheWay: [Int] = []
+        for (i, slot) in slots.enumerated() {
+            guard case .candidate(let url) = slot else { continue }
+            let path = Self.prepareForVerifyRead(url.path)
+            if let h = try? Self.sha256(of: url.path, chunkSize: options.chunkSize), h == sourceHash {
+                slots[i] = .done(.alreadyPresent(url, DestinationVerification(mode: .hash, path: path, destinationSHA256: h)))
+            } else if keepBoth {
+                inTheWay.append(i)
+            } else {
+                slots[i] = .done(.failed(url, reason: "a different file with this name already exists"))
+            }
+        }
+
+        // Rare: a different file of the same size holds the name. Write a second copy beside it,
+        // which needs one more read of the source (it must match the first).
+        if !inTheWay.isEmpty {
+            let extra = inTheWay.map { i -> PartialWriter in
+                guard case .candidate(let url) = slots[i] else { fatalError("not a candidate") }
+                return PartialWriter(finalURL: url, expectedSize: size, keepBothOnClash: true, partialTag: "b")
+            }
+            PageCache.evict(sourcePath)
+            let again = try? await readSource(sourcePath, index: nil, nil) { chunk in await Self.fanOut(chunk, to: extra) }
+            if let again, again.sha256 == sourceHash, again.bytes == total {
+                let extraSealed = extra.filter { $0.seal(fullSync: options.fullSync) }
+                extraSealed.forEach { afterSeal?($0.partialURL) }
+                let more = await verifyAndCommit(extra, sealed: extraSealed, sourcePath: sourcePath, sourceHash: sourceHash,
+                                                 total: total, modificationDate: request.source.modificationDate)
+                committed.merge(more) { $1 }
+                for (k, i) in inTheWay.enumerated() { slots[i] = .done(committed[ObjectIdentifier(extra[k])]!) }
+            } else {
+                extra.forEach { $0.abandon() }
+                for (k, i) in inTheWay.enumerated() {
+                    slots[i] = .done(.failed(extra[k].finalURL, reason: "source read unstable: a second read of the card gave different data"))
+                }
+            }
+        }
+
+        let outcomes = slots.map { slot -> DestinationOutcome in
+            switch slot {
+            case .write(let w): committed[ObjectIdentifier(w)] ?? .failed(w.finalURL, reason: "not committed")
+            case .done(let o): o
+            case .candidate(let url): .failed(url, reason: "not compared")
+            }
+        }
+        return FileCopyResult(request: request, sourceSHA256: sourceHash, bytesRead: total,
+                              sourceError: nil, destinations: outcomes)
+    }
+
+    private static func fanOut(_ chunk: Data, to writers: [PartialWriter]) async {
+        let live = writers.filter { $0.failure == nil }
+        await withTaskGroup(of: Void.self) { group in
+            for writer in live { group.addTask { writer.write(chunk) } }
+        }
+    }
+
+    /// Verifies sealed partials (per `options.verify`) and commits the ones that pass.
+    private func verifyAndCommit(_ writers: [PartialWriter], sealed: [PartialWriter], sourcePath: String, sourceHash: String,
+                                 total: Int64, modificationDate: Date?) async -> [ObjectIdentifier: DestinationOutcome] {
         var verifications: [ObjectIdentifier: DestinationVerification] = [:]
         if options.verify == .bytes {
             verifications = await compareBytes(sourcePath, total: total, writers: sealed)
@@ -122,17 +206,18 @@ public struct CopyEngine: Sendable {
                 for await (id, v) in group { if let v { verifications[id] = v } }
             }
         }
-
-        let outcomes = writers.map { writer -> DestinationOutcome in
-            guard let v = verifications[ObjectIdentifier(writer)] else {
+        var outcomes: [ObjectIdentifier: DestinationOutcome] = [:]
+        for writer in writers {
+            let id = ObjectIdentifier(writer)
+            if let v = verifications[id] {
+                outcomes[id] = writer.commit(verification: v, modificationDate: modificationDate)
+            } else {
                 if writer.failure == nil { writer.reject("verification failed") }
-                return writer.commit(verification: DestinationVerification(mode: options.verify, path: .notRead, destinationSHA256: nil),
-                                     modificationDate: nil)
+                outcomes[id] = writer.commit(verification: DestinationVerification(mode: options.verify, path: .notRead, destinationSHA256: nil),
+                                             modificationDate: nil)
             }
-            return writer.commit(verification: v, modificationDate: request.source.modificationDate)
         }
-        return FileCopyResult(request: request, sourceSHA256: sourceHash, bytesRead: total,
-                              sourceError: nil, destinations: outcomes)
+        return outcomes
     }
 
     // MARK: Reading

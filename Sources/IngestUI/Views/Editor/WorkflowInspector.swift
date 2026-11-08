@@ -42,6 +42,22 @@ struct SettingsPane: View {
         } footer: {
             Text("Used for photos whose camera didn't record a time zone. Photos that did are filed by local time where they were taken.")
         }
+        Section {
+            Picker("If a different file has the name", selection: $draft.workflow.onClash) {
+                Text("Keep both (add “ 2”)").tag(ClashPolicy.keepBoth)
+                Text("Don't copy that file").tag(ClashPolicy.fail)
+            }
+            Toggle("Copy only files not copied before", isOn: $draft.workflow.skipPreviouslyCopied)
+        } header: {
+            Text("Files already at the destination")
+        } footer: {
+            Text("Identical files already there are always skipped. Nothing is ever overwritten.")
+        }
+        Section("After copying") {
+            Toggle("Eject the card when everything verified", isOn: $draft.workflow.afterCopy.eject)
+            Toggle("Show a notification", isOn: $draft.workflow.afterCopy.notify)
+        }
+        AutoRunSection(draft: draft)
         Section("Names") {
             Picker("Extensions", selection: $draft.workflow.extensionCase) {
                 Text("As on card").tag(Workflow.ExtensionCase.original)
@@ -243,6 +259,50 @@ struct DestinationPane: View {
             if case .success(let url) = result {
                 draft.updateDestination(id) { $0.root = (url.path(percentEncoded: false) as NSString).abbreviatingWithTildeInPath }
             }
+        }
+    }
+}
+
+
+/// Auto-run rules: this card (hardware ID) and/or cameras (body serials). Never deletes.
+struct AutoRunSection: View {
+    @Bindable var draft: WorkflowDraft
+
+    var body: some View {
+        Section {
+            if let key = draft.previewSource?.hardwareID?.key {
+                Toggle("Run for this card (\(draft.previewSource?.title ?? "card"))", isOn: Binding(
+                    get: { draft.workflow.autoRun.cardKeys.contains(key) },
+                    set: { on in
+                        if on { if !draft.workflow.autoRun.cardKeys.contains(key) { draft.workflow.autoRun.cardKeys.append(key) } }
+                        else { draft.workflow.autoRun.cardKeys.removeAll { $0 == key } }
+                    }))
+            }
+            ForEach(Array((draft.previewSource?.bodySerials ?? [:]).sorted { $0.key < $1.key }), id: \.key) { serial, model in
+                Toggle("Run for cards from \(model) #\(serial)", isOn: Binding(
+                    get: { draft.workflow.autoRun.bodySerials.contains(serial) },
+                    set: { on in
+                        if on { if !draft.workflow.autoRun.bodySerials.contains(serial) { draft.workflow.autoRun.bodySerials.append(serial) } }
+                        else { draft.workflow.autoRun.bodySerials.removeAll { $0 == serial } }
+                    }))
+            }
+            ForEach(draft.workflow.autoRun.cardKeys.filter { $0 != draft.previewSource?.hardwareID?.key }, id: \.self) { key in
+                LabeledContent("Card \(key)") {
+                    Button("Remove") { draft.workflow.autoRun.cardKeys.removeAll { $0 == key } }.buttonStyle(.link)
+                }
+            }
+            ForEach(draft.workflow.autoRun.bodySerials.filter { draft.previewSource?.bodySerials[$0] == nil }, id: \.self) { serial in
+                LabeledContent("Camera #\(serial)") {
+                    Button("Remove") { draft.workflow.autoRun.bodySerials.removeAll { $0 == serial } }.buttonStyle(.link)
+                }
+            }
+            if draft.previewSource == nil && !draft.workflow.autoRun.isEnabled {
+                Text("Insert a card to set it, or its camera, to run this workflow automatically.").foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Run automatically")
+        } footer: {
+            Text("Starts when a matching card is inserted (not for cards already in when PhotoFerry opens). Auto-run copies and verifies; it never deletes from the card.")
         }
     }
 }

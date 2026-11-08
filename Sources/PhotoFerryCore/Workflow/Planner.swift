@@ -22,6 +22,9 @@ public struct CopyPlan: Sendable {
 
     public let workflow: Workflow
     public let entries: [Entry]
+    /// Planned files the ledger shows were already copied to every planned destination and are
+    /// still there (`skipPreviouslyCopied`). Not part of the job.
+    public let alreadyCopied: [Entry]
     /// Files no route took, or that a `skip` route deliberately left on the card.
     public let skipped: [SourceFile]
     public let issues: [Issue]
@@ -38,7 +41,7 @@ public struct CopyPlan: Sendable {
                         metadata: e.metadata)
         }
         return CopyJob(source: source, destinationRoots: used.map(\.rootURL), requests: requests,
-                       options: CopyOptions(verify: workflow.verify), workflowName: workflow.name)
+                       options: CopyOptions(verify: workflow.verify, onClash: workflow.onClash), workflowName: workflow.name)
     }
 }
 
@@ -83,8 +86,9 @@ public struct Planner: Sendable {
         if !problems.isEmpty { throw WorkflowError.invalid(problems) }
     }
 
-    /// Reads metadata and plans every file. `cardLabel` feeds `{card}`.
-    public func plan(_ files: [SourceFile], cardLabel: String?) async -> CopyPlan {
+    /// Reads metadata and plans every file. `cardLabel` feeds `{card}`. With a ledger and
+    /// `skipPreviouslyCopied`, files already copied to every planned destination are set aside.
+    public func plan(_ files: [SourceFile], cardLabel: String?, ledger: Ledger? = nil) async -> CopyPlan {
         let zone = workflow.timeZone.flatMap(TimeZone.init(identifier:)) ?? .current
         let reader = MetadataReader(fallbackTimeZone: zone)
         let items = ItemGrouper().group(files)
@@ -169,7 +173,28 @@ public struct Planner: Sendable {
             issues.append(.init(severity: .warning, message: "\(unrouted.count) file(s) matched no route and won't be copied: "
                                 + unrouted.prefix(5).map(\.relativePath).joined(separator: ", ") + (unrouted.count > 5 ? " …" : "")))
         }
-        if entries.isEmpty { issues.append(.init(severity: .error, message: "nothing to copy")) }
-        return CopyPlan(workflow: workflow, entries: entries, skipped: skipped, issues: issues)
+        // Already copied earlier (re-inserted card, or an interrupted job): leave those out.
+        // {seq} was numbered over every file first, so names stay stable across runs.
+        var alreadyCopied: [CopyPlan.Entry] = []
+        if workflow.skipPreviouslyCopied, let ledger, !entries.isEmpty {
+            let roots = Dictionary(uniqueKeysWithValues: workflow.destinations.map { ($0.id, $0.rootURL) })
+            let checks = entries.flatMap { e in e.destinationIDs.compactMap { roots[$0] }.map { (e.file, $0.appending(path: e.relativePath)) } }
+            if let done = try? ledger.previouslyCopied(checks) {
+                let (old, new) = entries.reduce(into: ([CopyPlan.Entry](), [CopyPlan.Entry]())) { acc, e in
+                    let paths = e.destinationIDs.compactMap { roots[$0]?.appending(path: e.relativePath).path }
+                    if !paths.isEmpty && paths.allSatisfy(done.contains) { acc.0.append(e) } else { acc.1.append(e) }
+                }
+                alreadyCopied = old
+                entries = new
+            }
+        }
+        if !alreadyCopied.isEmpty {
+            issues.append(.init(severity: .info, message: entries.isEmpty
+                ? "all \(alreadyCopied.count) files were already copied with this workflow and are still in place"
+                : "\(alreadyCopied.count) file(s) were already copied earlier and are still in place; only the \(entries.count) new file(s) will be copied"))
+        } else if entries.isEmpty {
+            issues.append(.init(severity: .error, message: "nothing to copy"))
+        }
+        return CopyPlan(workflow: workflow, entries: entries, alreadyCopied: alreadyCopied, skipped: skipped, issues: issues)
     }
 }

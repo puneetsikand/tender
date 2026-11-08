@@ -47,6 +47,15 @@ public struct DestinationVerification: Sendable, Hashable, Codable {
     public let destinationSHA256: String?
 }
 
+/// What to do when a destination already has a *different* file with the planned name.
+/// Identical files are always skipped (and recorded as already present); nothing is ever overwritten.
+public enum ClashPolicy: String, Sendable, Hashable, Codable, CaseIterable {
+    /// Keep both: the new copy gets a Finder-style suffix, `SDIM0199 2.DNG`.
+    case keepBoth
+    /// Fail that copy and leave the existing file alone.
+    case fail
+}
+
 public struct CopyOptions: Sendable, Hashable, Codable {
     /// Bytes per read. Every destination gets the same chunk.
     public var chunkSize: Int
@@ -56,8 +65,11 @@ public struct CopyOptions: Sendable, Hashable, Codable {
     public var fullSync: Bool
 
     public var verify: VerifyMode
+    public var onClash: ClashPolicy
 
-    public init(chunkSize: Int = 8 << 20, filesInFlight: Int = 2, fullSync: Bool = true, verify: VerifyMode = .hash) {
+    public init(chunkSize: Int = 8 << 20, filesInFlight: Int = 2, fullSync: Bool = true, verify: VerifyMode = .hash,
+                onClash: ClashPolicy = .keepBoth) {
+        self.onClash = onClash
         self.chunkSize = chunkSize
         self.filesInFlight = filesInFlight
         self.fullSync = fullSync
@@ -75,15 +87,24 @@ public struct CopyOptions: Sendable, Hashable, Codable {
 }
 
 public enum DestinationOutcome: Sendable, Hashable, Codable {
-    /// Written, verified, and renamed to its final name.
+    /// Written, verified, and renamed to its final name (which may carry a " 2" suffix).
     case written(URL, DestinationVerification)
+    /// An identical file was already there (compared by SHA-256), so nothing was written.
+    case alreadyPresent(URL, DestinationVerification)
     case failed(URL, reason: String)
 
     public var url: URL {
-        switch self { case .written(let u, _), .failed(let u, _): u }
+        switch self { case .written(let u, _), .alreadyPresent(let u, _), .failed(let u, _): u }
     }
     public var isWritten: Bool {
         if case .written = self { true } else { false }
+    }
+    /// The destination holds a verified copy, whether written now or already there.
+    public var isSatisfied: Bool {
+        switch self { case .written, .alreadyPresent: true; case .failed: false }
+    }
+    public var verification: DestinationVerification? {
+        switch self { case .written(_, let v), .alreadyPresent(_, let v): v; case .failed: nil }
     }
 }
 
@@ -96,10 +117,10 @@ public struct FileCopyResult: Sendable, Hashable, Codable {
     public let sourceError: String?
     public let destinations: [DestinationOutcome]
 
-    /// True only if the source was read and *every* destination was written.
+    /// True only if the source was read and *every* destination holds a verified copy.
     /// Never true for a request without destinations.
     public var succeeded: Bool {
-        sourceError == nil && !destinations.isEmpty && destinations.allSatisfy(\.isWritten)
+        sourceError == nil && !destinations.isEmpty && destinations.allSatisfy(\.isSatisfied)
     }
 }
 

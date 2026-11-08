@@ -64,21 +64,86 @@ import Testing
         #expect(partials(under: tmp).isEmpty)
     }
 
-    @Test func existingDestinationIsNeverOverwritten() async throws {
+    @Test func differentFileInTheWayIsNeverOverwritten() async throws {
         defer { try? FileManager.default.removeItem(at: tmp) }
         let (a, aData) = try makeSource("IMG_0002.CR3", bytes: 2_000_000)
         let taken = dest("A", a.fileName)
         try FileManager.default.createDirectory(at: taken.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("keep me".utf8).write(to: taken)
 
-        let summary = await run([CopyRequest(source: a, destinations: [taken, dest("B", a.fileName)])])
-        let result = try #require(summary.results.first)
-        #expect(!result.succeeded && !summary.allSucceeded)
-        #expect(result.destinations[0] == .failed(taken, reason: "destination already exists"))
-        #expect(result.destinations[1].isWritten)          // the other destination still gets its copy
+        // fail: the copy to A fails, B still gets its copy.
+        var summary = await run([CopyRequest(source: a, destinations: [taken, dest("B", a.fileName)])],
+                                CopyOptions(chunkSize: 1 << 20, onClash: .fail))
+        var result = try #require(summary.results.first)
+        #expect(!result.succeeded)
+        #expect(result.destinations[0] == .failed(taken, reason: "a different file with this name already exists"))
+        #expect(result.destinations[1].isWritten)
         #expect(try Data(contentsOf: taken) == Data("keep me".utf8))
-        #expect(try Data(contentsOf: dest("B", a.fileName)) == aData)
+
+        // keepBoth (the default): the copy lands beside it as "IMG_0002 2.CR3".
+        try FileManager.default.removeItem(at: dest("B", a.fileName))
+        summary = await run([CopyRequest(source: a, destinations: [taken])])
+        result = try #require(summary.results.first)
+        let beside = dest("A", "IMG_0002 2.CR3")
+        guard case .written(let url, _) = result.destinations[0] else { Issue.record("expected written"); return }
+        #expect(url == beside && result.succeeded)
+        #expect(try Data(contentsOf: taken) == Data("keep me".utf8))
+        #expect(try Data(contentsOf: beside) == aData)
         #expect(partials(under: tmp).isEmpty)
+    }
+
+    @Test func identicalFileAlreadyThereIsSkippedAndUntouched() async throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let (a, aData) = try makeSource("IMG_0005.CR3", bytes: 3_000_000)
+        let there = dest("A", a.fileName)
+        try FileManager.default.createDirectory(at: there.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try aData.write(to: there)
+        let before = try FileManager.default.attributesOfItem(atPath: there.path)[.modificationDate] as? Date
+
+        let summary = await run([CopyRequest(source: a, destinations: [there, dest("B", a.fileName)])])
+        let result = try #require(summary.results.first)
+        guard case .alreadyPresent(let url, let v) = result.destinations[0] else { Issue.record("expected alreadyPresent"); return }
+        #expect(url == there && v.destinationSHA256 == result.sourceSHA256 && v.path == .device)
+        #expect(result.destinations[1].isWritten)
+        #expect(result.succeeded && summary.allSucceeded)
+        #expect(try FileManager.default.attributesOfItem(atPath: there.path)[.modificationDate] as? Date == before)
+        #expect(!FileManager.default.fileExists(atPath: dest("A", "IMG_0005 2.CR3").path))
+    }
+
+    @Test(arguments: [ClashPolicy.keepBoth, .fail])
+    func sameSizeButDifferentFileIsDetectedByHash(policy: ClashPolicy) async throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let (a, aData) = try makeSource("IMG_0006.CR3", bytes: 1_500_000)
+        let there = dest("A", a.fileName)
+        try FileManager.default.createDirectory(at: there.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var other = aData
+        other[700_000] ^= 0xFF                      // same size, one byte different
+        try other.write(to: there)
+
+        let summary = await run([CopyRequest(source: a, destinations: [there])], CopyOptions(chunkSize: 1 << 20, onClash: policy))
+        let result = try #require(summary.results.first)
+        #expect(try Data(contentsOf: there) == other)            // never overwritten
+        switch policy {
+        case .keepBoth:
+            guard case .written(let url, _) = result.destinations[0] else { Issue.record("expected written"); return }
+            #expect(url.lastPathComponent == "IMG_0006 2.CR3")
+            #expect(try Data(contentsOf: url) == aData)
+        case .fail:
+            #expect(result.destinations[0] == .failed(there, reason: "a different file with this name already exists"))
+        }
+        #expect(partials(under: tmp).isEmpty)
+    }
+
+    @Test func rerunningAFinishedJobSkipsEverythingAndSucceeds() async throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let sources = try (1...3).map { try makeSource("IMG_000\($0).JPG", bytes: 400_000 * $0).0 }
+        let requests = sources.map { CopyRequest(source: $0, destinations: [dest("A", $0.fileName), dest("B", $0.fileName)]) }
+        #expect(await run(requests).allSucceeded)
+        let again = await run(requests)
+        #expect(again.allSucceeded)
+        #expect(again.results.allSatisfy { r in r.destinations.allSatisfy { if case .alreadyPresent = $0 { true } else { false } } })
+        let names = try FileManager.default.contentsOfDirectory(atPath: tmp.appendingPathComponent("A/2026").path)
+        #expect(names.count == 3)                                 // no " 2" duplicates
     }
 
     @Test func unwritableDestinationFailsAloneWithoutStoppingOthers() async throws {

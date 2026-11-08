@@ -13,6 +13,7 @@ usage: pf version
        pf scan <path>          list media items on a card or folder, with capture metadata
        pf copy <source> --to <dir> [--to <dir>…] [--flat] [--chunk <MB>] [--inflight <n>] [--no-sync]
                [--verify hash|paranoid|bytes|size]   default hash: re-read each copy from disk
+               [--on-clash keep-both|fail]          a different file has the name (identical ones are skipped)
                [--runner auto|xpc|local]   auto = the app's copy service when pf runs from inside
                                            PhotoFerry.app, otherwise in this process
                                copy media (reading each file once) into every destination;
@@ -59,10 +60,18 @@ func execute(_ job: CopyJob, on runner: any CopyRunner) async {
           + "chunk \(job.options.chunkSize >> 20) MB, \(job.options.filesInFlight) in flight, sync \(job.options.fullSync ? "on" : "off"), verify \(job.options.verify.rawValue)")
     if let key = job.source.cardKey { print("card \(key)") }
     var paths: [VerifyPath: Int] = [:]
+    var present = 0
+    var renamed = 0
     for await event in runner.run(job) {
         switch event {
         case .fileFinished(_, let r):
-            for case let .written(_, v) in r.destinations { paths[v.path, default: 0] += 1 }
+            for d in r.destinations {
+                if case let .written(url, v) = d {
+                    paths[v.path, default: 0] += 1
+                    if !r.request.destinations.contains(url) { renamed += 1; print("kept both: \(url.lastPathComponent)") }
+                }
+                if case .alreadyPresent = d { present += 1 }
+            }
             guard !r.succeeded else { break }
             print("FAILED \(r.request.source.relativePath): \(r.sourceError ?? "")")
             for case let .failed(url, reason) in r.destinations { print("    \(url.path): \(reason)") }
@@ -73,6 +82,8 @@ func execute(_ job: CopyJob, on runner: any CopyRunner) async {
                          s.results.count, s.bytesRead.formatted(sizeFormat),
                          Double(s.elapsed.components.seconds) + Double(s.elapsed.components.attoseconds) / 1e18,
                          s.megabytesPerSecond))
+            if present > 0 { print("already there (identical, skipped): \(present)") }
+            if renamed > 0 { print("written beside a different file with the same name: \(renamed)") }
             print("verified copies: " + paths.sorted { $0.key.rawValue < $1.key.rawValue }.map { "\($0.value) \($0.key.rawValue)" }.joined(separator: ", "))
             print(s.allSucceeded ? "all files copied and verified" : "\(s.failed.count) file(s) failed")
             if !s.allSucceeded { exit(1) }
@@ -93,7 +104,7 @@ func planOrFail(_ workflowName: String, _ sourcePath: String) async -> (CopyPlan
     let source = JobSource.describing(root)
     let files: [SourceFile]
     do { files = try CardScanner().scan(root) } catch { fail("scan: \(error)") }
-    return (await planner.plan(files, cardLabel: source.volumeLabel ?? root.lastPathComponent), source)
+    return (await planner.plan(files, cardLabel: source.volumeLabel ?? root.lastPathComponent, ledger: try? Ledger()), source)
 }
 
 switch args.first {
@@ -164,6 +175,8 @@ case "copy":
         case "--chunk": guard let v = rest.popFirst().flatMap(Int.init) else { fail(usage) }; options.chunkSize = v << 20
         case "--inflight": guard let v = rest.popFirst().flatMap(Int.init) else { fail(usage) }; options.filesInFlight = v
         case "--no-sync": options.fullSync = false
+        case "--on-clash":
+            switch rest.popFirst() { case "keep-both": options.onClash = .keepBoth; case "fail": options.onClash = .fail; default: fail(usage) }
         case "--verify": guard let m = rest.popFirst().flatMap(VerifyMode.init(rawValue:)) else { fail(usage) }; options.verify = m
         case "--runner": guard let r = rest.popFirst(), ["auto", "xpc", "local"].contains(r) else { fail(usage) }; runnerChoice = r
         default: fail(usage)
@@ -204,11 +217,12 @@ case "plan":
     for e in plan.entries {
         print("\(e.file.relativePath)  →  \(e.relativePath)  [\(e.destinationIDs.compactMap { roots[$0] }.joined(separator: ", "))]")
     }
-    for f in plan.skipped { print("\(f.relativePath)  →  (stays on card)") }
+    for e in plan.alreadyCopied { print("\(e.file.relativePath)  →  (already copied to \(e.relativePath))") }
+    for f in plan.skipped { print("\(f.relativePath)  →  (not copied)") }
     for issue in plan.issues { print(issue) }
-    print("\(plan.entries.count) files planned, \(plan.skipped.count) left on the card, source \(source.volumeLabel ?? source.root.path)"
-          + (plan.canRun ? "" : ". CANNOT RUN"))
-    if !plan.canRun { exit(1) }
+    print("\(plan.entries.count) files planned, \(plan.alreadyCopied.count) already copied, \(plan.skipped.count) not copied, source \(source.volumeLabel ?? source.root.path)"
+          + (plan.canRun ? "" : plan.entries.isEmpty && !plan.alreadyCopied.isEmpty ? ". Nothing new to copy." : ". CANNOT RUN"))
+    if !plan.canRun && plan.alreadyCopied.isEmpty { exit(1) }
 
 case "run":
     guard args.count >= 3 else { fail(usage) }

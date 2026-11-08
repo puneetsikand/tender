@@ -122,6 +122,11 @@ public final class WorkflowDraft {
         preview?.entries.count { $0.routeID == id } ?? 0
     }
 
+    /// Files of this route the ledger shows were already copied (left out of the plan).
+    public func alreadyCopiedCount(forRoute id: String) -> Int {
+        preview?.alreadyCopied.count { $0.routeID == id } ?? 0
+    }
+
     private func changed() {
         validate()
         schedulePreview(delay: .milliseconds(300))
@@ -146,11 +151,12 @@ public final class WorkflowDraft {
         }
         let files = card.files
         let label = card.title
+        let ledger = card.ledger
         previewTask = Task {
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
             previewing = true
-            let plan = await planner.plan(files, cardLabel: label)
+            let plan = await planner.plan(files, cardLabel: label, ledger: ledger)
             guard !Task.isCancelled else { return }
             preview = plan
             previewing = false

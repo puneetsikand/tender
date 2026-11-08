@@ -31,7 +31,7 @@ struct PipelineDiagram: View {
                     NodeBox(title: "\(i + 1). \(route.name)", subtitle: routeSubtitle(route),
                             icon: route.skip ? "nosign" : "arrow.triangle.branch",
                             selected: draft.selection == .route(route.id),
-                            badge: draft.preview.map { _ in "\(draft.count(forRoute: route.id))" })
+                            badge: draft.preview.map { _ in badge(route.id) })
                         .overlay(alignment: .trailing) { port(for: route) }
                         .frameTag(.route(route.id))
                         .onTapGesture { draft.selection = .route(route.id) }
@@ -140,6 +140,12 @@ struct PipelineDiagram: View {
         return out
     }
 
+    /// "22", or "0/22" when some of the route's files were already copied earlier.
+    private func badge(_ id: String) -> String {
+        let new = draft.count(forRoute: id), done = draft.alreadyCopiedCount(forRoute: id)
+        return done == 0 ? "\(new)" : "\(new)/\(new + done)"
+    }
+
     private var sourceSubtitle: String {
         guard let card = draft.previewSource else { return "Insert a card to preview" }
         return "\(card.files.count) files · never modified"
@@ -209,7 +215,7 @@ struct NodeBox: View {
             if let badge {
                 Text(badge).font(.caption.monospacedDigit()).padding(.horizontal, 6).padding(.vertical, 2)
                     .background(.quaternary, in: Capsule())
-                    .help("Files on the inserted card this route copies")
+                    .help("Files on the inserted card this route copies (new / total when some were already copied)")
             }
         }
         .padding(10)
