@@ -52,6 +52,26 @@ public enum DevSnapshots {
             _ = try await waitFor("the replan", timeout: 20) { session.planning ? nil : true }
         }
 
+        // Preview pane: a RAW (a GFX100RF one if present) in RAW-only mode, then its SOOC partner.
+        if let raw = session.files.first(where: { $0.fileName.hasPrefix("GFXR") && $0.kind == .raw })
+            ?? session.files.first(where: { $0.kind == .raw }) {
+            window.setContentSize(NSSize(width: 1440, height: 900))
+            window.contentView = NSHostingView(rootView: IngestRootView(store: store, initialSelection: .card(session.id))
+                .frame(width: 1440, height: 900).background(Color(nsColor: .windowBackgroundColor)))
+            session.previewMode = .raw
+            session.selectedPath = raw.relativePath
+            _ = try await waitFor("the RAW preview", timeout: 30) { await previewLoader.isCached(raw.url) ? true : nil }
+            try await snap(window, outputDir.appending(path: "1c-preview-raw.png"))
+            session.previewMode = .sooc
+            if let jpeg = session.previewNavigator.shown(for: raw.relativePath, mode: .sooc) {
+                _ = try await waitFor("the SOOC preview", timeout: 30) { await previewLoader.isCached(jpeg.url) ? true : nil }
+            }
+            try await snap(window, outputDir.appending(path: "1d-preview-sooc.png"))
+            window.setContentSize(NSSize(width: 1100, height: 680))
+            show(.card(session.id))
+        }
+        if ProcessInfo.processInfo.environment["PF_SNAPSHOT_SKIP_COPY"] != nil { return }
+
         session.startImport(runner: InProcessCopyRunner())
         let job = try await waitFor("the job", timeout: 5) { session.job }
         _ = try await waitFor("progress", timeout: 60) { job.fraction > 0.35 ? true : nil }
@@ -104,10 +124,10 @@ public enum DevSnapshots {
         var description: String { "timed out waiting for \(what)" }
     }
 
-    static func waitFor<T>(_ what: String, timeout: Double, _ probe: () -> T?) async throws -> T {
+    static func waitFor<T>(_ what: String, timeout: Double, _ probe: () async -> T?) async throws -> T {
         let deadline = Date.now.addingTimeInterval(timeout)
         while Date.now < deadline {
-            if let v = probe() { return v }
+            if let v = await probe() { return v }
             try await Task.sleep(for: .milliseconds(100))
         }
         throw Timeout(what: what)

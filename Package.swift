@@ -9,6 +9,8 @@ let package = Package(
         .library(name: "PhotoFerryCore", targets: ["PhotoFerryCore"]),
         // Ingest views a future browser app can embed as-is (PLAN §8A.1).
         .library(name: "IngestUI", targets: ["IngestUI"]),
+        // Fast previews (embedded RAW previews, reduced-size decodes, cache). Shared with the future browser.
+        .library(name: "PhotoPreview", targets: ["PhotoPreview"]),
         .executable(name: "PhotoFerry", targets: ["PhotoFerry"]),
         .executable(name: "pf", targets: ["pf"]),
         .executable(name: "PhotoFerryCopyService", targets: ["PhotoFerryCopyService"]),
@@ -18,12 +20,13 @@ let package = Package(
     ],
     targets: [
         .target(name: "PhotoFerryCore", dependencies: [.product(name: "GRDB", package: "GRDB.swift")]),
-        .target(name: "IngestUI", dependencies: ["PhotoFerryCore"]),
+        .target(name: "PhotoPreview"),
+        .target(name: "IngestUI", dependencies: ["PhotoFerryCore", "PhotoPreview"]),
         .executableTarget(name: "PhotoFerry", dependencies: ["PhotoFerryCore", "IngestUI"]),
         .executableTarget(name: "pf", dependencies: ["PhotoFerryCore"]),
         // Bundled by scripts/package.sh as Contents/XPCServices/local.photoferry.copyservice.xpc.
         .executableTarget(name: "PhotoFerryCopyService", dependencies: ["PhotoFerryCore"]),
         .testTarget(name: "PhotoFerryCoreTests", dependencies: ["PhotoFerryCore"]),
-        .testTarget(name: "IngestUITests", dependencies: ["IngestUI", "PhotoFerryCore"]),
+        .testTarget(name: "IngestUITests", dependencies: ["IngestUI", "PhotoFerryCore", "PhotoPreview"]),
     ]
 )

@@ -9,6 +9,7 @@ public struct CardFileList: Sendable {
         case alreadyCopied(String)
         case notCopied(String)           // reason
         case excluded                    // unticked for this copy
+        case settling                    // still being written to the card
         case outsideNotIncluded          // in a folder outside DCIM that isn't included
         case pending                     // no plan yet (choose a workflow)
 
@@ -16,7 +17,7 @@ public struct CardFileList: Sendable {
             switch self {
             case .toCopy: .toCopy
             case .alreadyCopied: .alreadyCopied
-            case .notCopied, .excluded: .notCopied
+            case .notCopied, .excluded, .settling: .notCopied
             case .outsideNotIncluded: .outsideDCIM
             case .pending: nil
             }
@@ -63,7 +64,8 @@ public struct CardFileList: Sendable {
     /// Folder key of a file: its directory on the card ("" for the top level).
     public static func folderKey(of file: SourceFile) -> String { file.directory }
 
-    public init(files: [SourceFile], outside: [SourceFile], plan: CopyPlan?, excluded: Set<String>, includedOutside: Set<String>) {
+    public init(files: [SourceFile], outside: [SourceFile], plan: CopyPlan?, excluded: Set<String>, includedOutside: Set<String>,
+                settling: Set<String> = []) {
         var status: [String: Status] = [:]
         if let plan {
             for e in plan.entries { status[e.file.relativePath] = .toCopy(e.relativePath) }
@@ -71,6 +73,7 @@ public struct CardFileList: Sendable {
             for f in plan.skipped { status[f.relativePath] = .notCopied(plan.notCopiedReasons[f.relativePath] ?? "not copied") }
         }
         func row(_ f: SourceFile, outside: Bool) -> Row {
+            if settling.contains(f.relativePath) { return Row(file: f, status: .settling) }
             if excluded.contains(f.relativePath) { return Row(file: f, status: .excluded) }
             if outside && !includedOutside.contains(Self.folderKey(of: f)) { return Row(file: f, status: .outsideNotIncluded) }
             return Row(file: f, status: status[f.relativePath] ?? .pending)

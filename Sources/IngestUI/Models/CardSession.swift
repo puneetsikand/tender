@@ -41,6 +41,15 @@ public final class CardSession: Identifiable {
     public private(set) var includedOutsideFolders: Set<String> = []
     /// Files the user unticked for this copy, by relative path. Survives a refresh.
     public private(set) var excludedFiles: Set<String> = []
+    /// Files still being written to the card (empty, or growing). Left out until they settle.
+    public private(set) var settlingFiles: Set<String> = []
+    private var settleTask: Task<Void, Never>?
+    /// The file selected in the list (relative path); the preview follows it.
+    public var selectedPath: String?
+    /// The preview's two-way switch. Set once from the card's contents, then left to the user.
+    public var previewMode: PreviewMode = .sooc
+    private var previewModeChosen = false
+    private var itemsByPath: [String: MediaItem] = [:]
     public private(set) var lastScanned: Date?
     /// The card changed while a copy was running; rescan when it finishes.
     public private(set) var changedDuringCopy = false
@@ -106,6 +115,15 @@ public final class CardSession: Identifiable {
             files = found
             outsideMedia = outside
             outsideFiles = outsideFound
+            settlingFiles = WriteSettle.empty(found + outsideFound)
+            var items: [String: MediaItem] = [:]
+            for item in ItemGrouper().group(found + outsideFound) { for m in item.members { items[m.relativePath] = item } }
+            itemsByPath = items
+            if !previewModeChosen {
+                previewModeChosen = true
+                previewMode = found.contains { PreviewMode.sooc.accepts($0.kind) } ? .sooc : .raw
+            }
+            checkSettling(found + outsideFound)
         } catch {
             scanError = error.localizedDescription
         }
@@ -167,10 +185,31 @@ public final class CardSession: Identifiable {
         }
     }
 
-    /// What the plan is made from: DCIM files and the included outside folders, minus unticked files.
+    /// What the plan is made from: DCIM files and the included outside folders, minus unticked
+    /// files and files still being written.
     var filesToPlan: [SourceFile] {
         let outside = outsideFiles.filter { includedOutsideFolders.contains(CardFileList.folderKey(of: $0)) }
-        return (files + outside).filter { !excludedFiles.contains($0.relativePath) }
+        return (files + outside).filter { !excludedFiles.contains($0.relativePath) && !settlingFiles.contains($0.relativePath) }
+    }
+
+    /// A second look shortly after reading: files whose size moved are still being written.
+    /// While any are, the card is read again every few seconds until they settle.
+    private func checkSettling(_ scanned: [SourceFile]) {
+        settleTask?.cancel()
+        settleTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(1500))
+            guard let self, !Task.isCancelled else { return }
+            let moving = await Task.detached { WriteSettle.changedSinceScan(scanned) }.value
+            let unsettled = self.settlingFiles.union(moving)
+            if unsettled != self.settlingFiles {
+                self.settlingFiles = unsettled
+                await self.replan()
+            }
+            guard !unsettled.isEmpty else { return }
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            await self.refresh()
+        }
     }
 
     /// Ticks or unticks one file for this copy.
@@ -190,9 +229,14 @@ public final class CardSession: Identifiable {
         Task { await replan() }
     }
 
+    public var previewNavigator: PreviewNavigator {
+        PreviewNavigator(order: fileList.folders.flatMap { $0.rows.map(\.file) }, items: itemsByPath)
+    }
+
     /// The card's files grouped for the list, with what will happen to each.
     public var fileList: CardFileList {
-        CardFileList(files: files, outside: outsideFiles, plan: plan, excluded: excludedFiles, includedOutside: includedOutsideFolders)
+        CardFileList(files: files, outside: outsideFiles, plan: plan, excluded: excludedFiles, includedOutside: includedOutsideFolders,
+                     settling: settlingFiles)
     }
 
     public var canImport: Bool { plan?.canRun == true && job?.isRunning != true && !removed }

@@ -118,6 +118,12 @@ public struct CopyEngine: Sendable {
         } catch {
             return sourceFailure("read: \(error.localizedDescription)", writers: writers)
         }
+        // A file that grew or shrank since the card was scanned is still being written (or was
+        // replaced). Never copy a moving target, however consistently it read back.
+        guard total == size else {
+            return sourceFailure("the file changed size while it was being read (\(size) → \(total) bytes); it may still be being written to the card",
+                                 read: total, writers: writers)
+        }
 
         out.yield(.verifying(index: index))
         let sealed = writers.filter { $0.seal(fullSync: options.fullSync) }

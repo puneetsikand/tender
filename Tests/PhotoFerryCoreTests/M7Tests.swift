@@ -188,3 +188,38 @@ import Testing
 private extension String {
     func appendingPathComponent(_ c: String) -> URL { URL(fileURLWithPath: self).appendingPathComponent(c) }
 }
+
+@Suite struct StillBeingWrittenTests {
+    let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("pf-settle-\(UUID().uuidString)")
+
+    func file(_ name: String, bytes: Int) throws -> SourceFile {
+        let url = tmp.appendingPathComponent("card/DCIM/\(name)")
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(repeating: 1, count: bytes).write(to: url)
+        return SourceFile(url: url, relativePath: "DCIM/\(name)", size: Int64(bytes), modificationDate: nil, kind: .raw)
+    }
+
+    @Test func detectsEmptyAndGrowingFiles() throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let done = try file("A.RAF", bytes: 1000), empty = try file("B.RAF", bytes: 0), growing = try file("C.RAF", bytes: 500)
+        let h = try FileHandle(forWritingTo: growing.url); try h.seekToEnd(); try h.write(contentsOf: Data(count: 500)); try h.close()
+        #expect(WriteSettle.empty([done, empty, growing]) == ["DCIM/B.RAF"])
+        #expect(WriteSettle.changedSinceScan([done, empty, growing]) == ["DCIM/C.RAF"])
+    }
+
+    @Test func engineRefusesAFileThatGrewSinceTheScan() async throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let scanned = try file("GFXR1509.RAF", bytes: 300_000)
+        let h = try FileHandle(forWritingTo: scanned.url); try h.seekToEnd(); try h.write(contentsOf: Data(count: 200_000)); try h.close()
+        let dest = tmp.appendingPathComponent("lib/GFXR1509.RAF")
+        var result: FileCopyResult?
+        for await e in CopyEngine(options: CopyOptions(chunkSize: 1 << 16)).run([CopyRequest(source: scanned, destinations: [dest])]) {
+            if case .finished(let s) = e { result = s.results.first }
+        }
+        let r = try #require(result)
+        #expect(!r.succeeded)
+        #expect(r.sourceError?.contains("changed size while it was being read") == true)
+        #expect(!FileManager.default.fileExists(atPath: dest.path))
+        #expect(((try? FileManager.default.contentsOfDirectory(atPath: dest.deletingLastPathComponent().path)) ?? []).isEmpty)
+    }
+}

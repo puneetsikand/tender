@@ -73,3 +73,12 @@ struct FakeCardUI: ~Copyable {
     }
     deinit { try? FileManager.default.removeItem(at: root) }
 }
+
+@Suite struct SettlingListTests {
+    @Test func filesStillBeingWrittenAreShownAndNotCopied() {
+        let a = SourceFile(url: URL(fileURLWithPath: "/c/DCIM/A.RAF"), relativePath: "DCIM/A.RAF", size: 0, modificationDate: nil, kind: .raw)
+        let list = CardFileList(files: [a], outside: [], plan: nil, excluded: [], includedOutside: [], settling: ["DCIM/A.RAF"])
+        #expect(list.folders[0].rows[0].status == CardFileList.Status.settling)
+        #expect(list.count(CardFileList.Filter.notCopied) == 1)
+    }
+}

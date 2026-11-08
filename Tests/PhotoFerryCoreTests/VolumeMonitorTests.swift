@@ -18,6 +18,19 @@ import Testing
         return text
     }
 
+    /// Detach, retrying: another process (e.g. a running PhotoFerry, which treats any volume with
+    /// DCIM as a card and reads it) can briefly keep the volume busy. Forces on the last try.
+    static func detach(_ path: String) throws {
+        for attempt in 1...4 {
+            do {
+                if attempt < 4 { try hdiutil("detach", "-quiet", path) } else { try hdiutil("detach", "-quiet", "-force", path) }
+                return
+            } catch where attempt < 4 {
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+        }
+    }
+
     @Test(.timeLimit(.minutes(1)))
     func reportsCardMountAndUnmount() async throws {
         let label = "PFTEST\(Int.random(in: 1000...9999))"
@@ -27,6 +40,7 @@ import Testing
 
         var events = VolumeMonitor.events().makeAsyncIterator()
         try Self.hdiutil("attach", "-quiet", "-nobrowse", dmg.path)
+        defer { try? Self.hdiutil("detach", "-quiet", "-force", "/Volumes/\(label)") }   // cleanup if a check fails
         var mounted: VolumeInfo?
         while mounted == nil, let e = await events.next() {
             if case .mounted(let v) = e, v.name == label { mounted = v }
@@ -42,7 +56,7 @@ import Testing
                                                 withIntermediateDirectories: true)
         #expect(CardScanner().looksLikeCard(mountPoint))
 
-        try Self.hdiutil("detach", "-quiet", mountPoint.path)
+        try Self.detach(mountPoint.path)
         var unmounted = false
         while !unmounted, let e = await events.next() {
             if case .unmounted(let id) = e, id == v.id { unmounted = true }

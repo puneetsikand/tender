@@ -182,7 +182,12 @@ struct CardDetailView: View {
         } else if let error = session.planError {
             ContentUnavailableView("Workflow problem", systemImage: "exclamationmark.triangle", description: Text(error))
         } else {
-            CardFileListView(session: session)
+            HSplitView {
+                CardFileListView(session: session)
+                    .frame(minWidth: 460)
+                PreviewPane(session: session)
+                    .frame(minWidth: 320, idealWidth: 440, maxWidth: .infinity)
+            }
         }
     }
 }

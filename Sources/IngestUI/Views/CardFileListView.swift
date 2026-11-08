@@ -6,11 +6,10 @@ import SwiftUI
 /// filter the list; checkboxes include or exclude files and folders for this copy; folders
 /// outside DCIM are offered (unticked) in their own section. Space = Quick Look.
 struct CardFileListView: View {
-    let session: CardSession
+    @Bindable var session: CardSession
     @State private var filter: CardFileList.Filter?
     @State private var expanded: Set<String> = []
     @State private var expandedInitially = false
-    @State private var selection: String?
     @State private var previewURL: URL?
     @State private var showingNotes = false
 
@@ -20,7 +19,7 @@ struct CardFileListView: View {
             errorStrip
             chipBar(list)
             Divider()
-            List(selection: $selection) {
+            List(selection: $session.selectedPath) {
                 let inside = visible(list.folders.filter { !$0.isOutsideDCIM })
                 let outside = visible(list.folders.filter(\.isOutsideDCIM))
                 if !inside.isEmpty {
@@ -36,7 +35,7 @@ struct CardFileListView: View {
             }
             .quickLookPreview($previewURL, in: list.folders.flatMap { $0.rows.map(\.file.url) })
             .onKeyPress(.space) {
-                guard let id = selection, let row = list.folders.lazy.flatMap(\.rows).first(where: { $0.id == id }) else { return .ignored }
+                guard let id = session.selectedPath, let row = list.folders.lazy.flatMap(\.rows).first(where: { $0.id == id }) else { return .ignored }
                 previewURL = row.file.url
                 return .handled
             }
@@ -175,6 +174,7 @@ struct CardFileListView: View {
         case .alreadyCopied(let p): Text("→ \(p)")
         case .notCopied(let why): Text(why)
         case .excluded: Text("unticked for this copy")
+        case .settling: Text("still being written to the card; it's read again when finished")
         case .outsideNotIncluded: Text("outside DCIM")
         case .pending: Text("")
         }
@@ -186,6 +186,7 @@ struct CardFileListView: View {
         case .alreadyCopied: ("copied", .green)
         case .notCopied: ("skipped", .orange)
         case .excluded: ("excluded", .secondary)
+        case .settling: ("writing…", .orange)
         case .outsideNotIncluded: ("outside", .purple)
         case .pending: ("", .clear)
         }
