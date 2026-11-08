@@ -92,3 +92,32 @@ struct FakeCard: ~Copyable {
         #expect(ItemGrouper().group([]).isEmpty)
     }
 }
+
+@Suite struct OutsideMediaTests {
+    @Test func countsPhotosOutsideDCIMByFolderAndIgnoresTheRest() throws {
+        let card = try FakeCard([
+            "DCIM/100SIGMA/SDIM0001.DNG",
+            "IRPC0001.RAF", "IRPC0001.RAF.xmp", "IRPC0001.RAF.pp3", "._IRPC0001.RAF",
+            "soocjpeg/IRPC0001.JPG", "soocjpeg/IRPC0002.JPG", "soocjpeg/notes.txt",
+            "PRIVATE/M4ROOT/CLIP/C0001.MP4",
+        ])
+        let outside = CardScanner().mediaOutsideRoots(card.root)
+        #expect(outside.count == 3)                          // 1 RAF at the root + 2 JPEGs; sidecars/notes/._ don't count
+        #expect(outside.folders == ["soocjpeg", ""])
+        #expect(CardScanner().mediaOutsideRoots(try FakeCard(["DCIM/100A/A.JPG"]).root).isEmpty)
+    }
+}
+
+@Suite struct FolderWatcherTests {
+    @Test(.timeLimit(.minutes(1)))
+    func reportsAFileAddedToTheWatchedFolder() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pf-watch-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("DCIM"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var changes = FolderWatcher.changes(of: dir, latency: 0.2).makeAsyncIterator()
+        try await Task.sleep(for: .milliseconds(500))        // let the stream start
+        try Data("x".utf8).write(to: dir.appendingPathComponent("DCIM/NEW.JPG"))
+        let got: Void? = await changes.next()
+        #expect(got != nil)
+    }
+}

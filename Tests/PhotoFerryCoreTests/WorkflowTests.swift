@@ -336,3 +336,32 @@ import Testing
         #expect(!again.issues.contains { $0.severity == .error })
     }
 }
+
+@Suite struct WholeNameSidecarTests {
+    let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("pf-xmp-\(UUID().uuidString)")
+
+    @Test func lightroomStyleSidecarsFollowTheirExactFileAndKeepThePairing() async throws {
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let dir = tmp.appendingPathComponent("card/DCIM/untitled folder")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for n in ["M10_1091.DNG", "M10_1091.DNG.xmp", "M10_1091.JPG", "M10_1091.JPG.xmp", "IMG_7.CR3", "IMG_7.xmp",
+                  "ORPHAN.RAF.xmp", "X.RAF", "X.RAF.pp3"] {
+            try Data(n.utf8).write(to: dir.appendingPathComponent(n))
+        }
+        let files = try CardScanner().scan(tmp.appendingPathComponent("card"))
+        let groups = ItemGrouper().group(files)
+        #expect(groups.first { $0.id.hasSuffix("/M10_1091") }?.members.count == 4)
+
+        var w = Workflow.starter(root: tmp.appendingPathComponent("lib").path)
+        w.routes[0].folder = "RAW"; w.routes[0].fileName = "LEICA_{orig}"
+        w.routes[1].folder = "SOOC"; w.routes[1].fileName = "LEICA_{orig}"
+        let plan = await try Planner(w).plan(files, cardLabel: nil)
+        let paths = Dictionary(uniqueKeysWithValues: plan.entries.map { ($0.file.fileName, $0.relativePath) })
+        #expect(paths["M10_1091.DNG.xmp"] == "RAW/LEICA_M10_1091.DNG.xmp")    // beside the RAW, pairing kept
+        #expect(paths["M10_1091.JPG.xmp"] == "SOOC/LEICA_M10_1091.JPG.xmp")   // beside the JPEG, not the RAW
+        #expect(paths["IMG_7.xmp"] == "RAW/LEICA_IMG_7.xmp")                  // classic naming still works
+        #expect(paths["X.RAF.pp3"] == "RAW/LEICA_X.RAF.pp3")                  // RawTherapee sidecar
+        #expect(plan.skipped.map(\.fileName) == ["ORPHAN.RAF.xmp"])           // its file isn't on the card
+        #expect(!plan.issues.contains { $0.severity == .error })
+    }
+}

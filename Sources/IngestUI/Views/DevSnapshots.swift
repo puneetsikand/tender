@@ -13,7 +13,11 @@ public enum DevSnapshots {
         let store = DeviceStore()
         store.start()
 
-        let session = try await waitFor("a card", timeout: 20) { store.cards.first { !$0.scanning } }
+        // PF_SNAPSHOT_CARD picks a card by volume name (e.g. a demo image) when several are in.
+        let wanted = ProcessInfo.processInfo.environment["PF_SNAPSHOT_CARD"]
+        let session = try await waitFor("a card", timeout: 20) {
+            store.cards.first { !$0.scanning && (wanted == nil || $0.title == wanted) }
+        }
         if store.library.workflows.isEmpty {
             try store.library.save(Workflow.starter(name: "Date, then type", root: outputDir.appending(path: "library").path))
         }
@@ -32,6 +36,21 @@ public enum DevSnapshots {
         }
         show(.card(session.id))
         try await snap(window, outputDir.appending(path: "1-card.png"))
+        if let outside = session.fileList.folders.first(where: \.isOutsideDCIM) {
+            session.setIncluded(true, folder: outside)
+            _ = try await waitFor("the replan", timeout: 20) {
+                session.fileList.folders.first(where: \.isOutsideDCIM)?.included ?? 0 > 0 && session.plan != nil ? true : nil
+            }
+            // Tall window so the outside-DCIM section at the bottom is in frame.
+            window.setContentSize(NSSize(width: 1100, height: 1500))
+            window.contentView = NSHostingView(rootView: IngestRootView(store: store, initialSelection: .card(session.id))
+                .frame(width: 1100, height: 1500).background(Color(nsColor: .windowBackgroundColor)))
+            try await snap(window, outputDir.appending(path: "1b-outside-included.png"))
+            window.setContentSize(NSSize(width: 1100, height: 680))
+            show(.card(session.id))
+            session.setIncluded(false, folder: session.fileList.folders.first(where: \.isOutsideDCIM)!)
+            _ = try await waitFor("the replan", timeout: 20) { session.planning ? nil : true }
+        }
 
         session.startImport(runner: InProcessCopyRunner())
         let job = try await waitFor("the job", timeout: 5) { session.job }
@@ -62,6 +81,22 @@ public enum DevSnapshots {
         try await snap(window, outputDir.appending(path: "5-editor.png"))
         draft.selection = .settings
         try await snap(window, outputDir.appending(path: "6-settings.png"))
+
+        // Regression (crash 2026-11-08): delete the destination / route whose pane is showing.
+        if let nas = draft.workflow.destinations.last {
+            draft.selection = .destination(nas.id)
+            try await snap(window, outputDir.appending(path: "7-destination.png"))
+            draft.removeDestination(nas.id)
+            try await snap(window, outputDir.appending(path: "8-after-destination-delete.png"))
+        }
+        if let route = draft.workflow.routes.last {
+            draft.selection = .route(route.id)
+            try await snap(window, outputDir.appending(path: "9-route.png"))
+            draft.removeRoute(route.id)
+            try await snap(window, outputDir.appending(path: "10-after-route-delete.png"))
+        }
+        draft.revert()   // also reverts the added NAS destination while it may be selected
+        try await snap(window, outputDir.appending(path: "11-after-revert.png"))
     }
 
     struct Timeout: Error, CustomStringConvertible {

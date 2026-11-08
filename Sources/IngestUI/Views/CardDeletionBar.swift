@@ -23,8 +23,10 @@ struct CardDeletionBar: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button(role: .destructive) { confirming = true } label: {
-                    Label("Delete \(summary.results.count) Files from Card…", systemImage: "trash")
+                    Label("Delete \(summary.results.count) Files from Card…", systemImage: "trash").frame(minWidth: 220)
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
                 .disabled(session.deleting)
             }
             .confirmationDialog("Delete \(summary.results.count) verified files from \(session.title)?", isPresented: $confirming) {

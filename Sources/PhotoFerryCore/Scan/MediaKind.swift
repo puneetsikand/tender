@@ -25,7 +25,7 @@ public enum MediaKind: String, Sendable, Codable, CaseIterable {
             (.heif, ["heic", "heif", "hif"]),
             (.tiff, ["tif", "tiff"]),
             (.video, ["mov", "mp4", "m4v", "mxf", "avi", "mts", "m2ts", "braw", "r3d", "crm"]),
-            (.sidecar, ["xmp", "thm", "xml", "lrf", "wav", "srt"]),
+            (.sidecar, ["xmp", "thm", "xml", "lrf", "wav", "srt", "pp3", "dop"]),   // pp3 RawTherapee, dop DxO
         ]
         for (kind, exts) in groups { for e in exts { t[e] = kind } }
         return t

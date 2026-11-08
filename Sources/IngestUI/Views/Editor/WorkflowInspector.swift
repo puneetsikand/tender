@@ -73,22 +73,29 @@ struct RoutePane: View {
     let draft: WorkflowDraft
     let id: String
 
+    /// Stand-in while SwiftUI redraws a pane whose route was just deleted (or reverted away).
+    private static let placeholder = Workflow.Route(id: "", name: "", match: .init(), folder: "", destinations: [])
+
     private func bind<T>(_ key: WritableKeyPath<Workflow.Route, T>) -> Binding<T> {
-        Binding(get: { draft.route(id)![keyPath: key] },
+        Binding(get: { (draft.route(id) ?? Self.placeholder)[keyPath: key] },
                 set: { v in draft.updateRoute(id) { $0[keyPath: key] = v } })
     }
 
     /// Comma-separated text ↔ optional list (empty text = no condition).
     private func list(_ key: WritableKeyPath<Workflow.Match, [String]?>) -> Binding<String> {
-        Binding(get: { (draft.route(id)!.match[keyPath: key] ?? []).joined(separator: ", ") },
+        Binding(get: { ((draft.route(id) ?? Self.placeholder).match[keyPath: key] ?? []).joined(separator: ", ") },
                 set: { text in
                     let items = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
                     draft.updateRoute(id) { $0.match[keyPath: key] = items.isEmpty ? nil : items }
                 })
     }
 
+    // The route can disappear between the delete and SwiftUI switching panes; render nothing then.
     var body: some View {
-        let route = draft.route(id)!
+        if let route = draft.route(id) { content(route) }
+    }
+
+    @ViewBuilder private func content(_ route: Workflow.Route) -> some View {
         let index = draft.workflow.routes.firstIndex { $0.id == id } ?? 0
         Section("Route \(index + 1)") {
             TextField("Name", text: bind(\.name))
@@ -124,7 +131,7 @@ struct RoutePane: View {
             if !route.skip {
                 ForEach(draft.workflow.destinations) { d in
                     Toggle(d.name, isOn: Binding(
-                        get: { draft.route(id)!.destinations.contains(d.id) },
+                        get: { draft.route(id)?.destinations.contains(d.id) ?? false },
                         set: { on in draft.updateRoute(id) { r in
                             if on { if !r.destinations.contains(d.id) { r.destinations.append(d.id) } }
                             else { r.destinations.removeAll { $0 == d.id } }
@@ -236,10 +243,15 @@ struct DestinationPane: View {
     let id: String
     @State private var choosing = false
 
+    // The destination can disappear between the delete and SwiftUI switching panes (this crashed
+    // on 2026-11-08 when a destination was deleted); render nothing then.
     var body: some View {
-        let d = draft.destination(id)!
+        if let d = draft.destination(id) { content(d) }
+    }
+
+    @ViewBuilder private func content(_ d: Workflow.Destination) -> some View {
         Section("Destination") {
-            TextField("Name", text: Binding(get: { draft.destination(id)!.name },
+            TextField("Name", text: Binding(get: { draft.destination(id)?.name ?? "" },
                                             set: { v in draft.updateDestination(id) { $0.name = v } }))
             LabeledContent("Folder") {
                 HStack {

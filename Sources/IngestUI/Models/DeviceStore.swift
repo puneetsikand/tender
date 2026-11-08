@@ -48,6 +48,7 @@ public final class DeviceStore {
         case .unmounted(let id):
             guard let session = cards.first(where: { $0.id == id }) else { return }
             presentAtLaunch.remove(session.root.standardizedFileURL.path)   // a re-insert is a live insert
+            session.stopWatching()
             if session.job?.isRunning == true {
                 session.removed = true      // keep it on screen: the job will report what didn't copy
             } else {

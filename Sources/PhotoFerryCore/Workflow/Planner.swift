@@ -15,8 +15,16 @@ public struct CopyPlan: Sendable {
 
     public struct Issue: Sendable, Hashable, CustomStringConvertible {
         public enum Severity: String, Sendable { case error, warning, info }
+        /// What the issue is about, so a UI can show some as counts or filters instead of sentences.
+        public enum Topic: String, Sendable { case general, nameClash, undated, timeZone, unrouted, orphanSidecars, alreadyCopied, nothingToCopy }
         public let severity: Severity
         public let message: String
+        public let topic: Topic
+        public init(severity: Severity, message: String, topic: Topic = .general) {
+            self.severity = severity
+            self.message = message
+            self.topic = topic
+        }
         public var description: String { "\(severity.rawValue): \(message)" }
     }
 
@@ -27,6 +35,8 @@ public struct CopyPlan: Sendable {
     public let alreadyCopied: [Entry]
     /// Files no route took, or that a `skip` route deliberately left on the card.
     public let skipped: [SourceFile]
+    /// Why each skipped file isn't copied, by relative path.
+    public let notCopiedReasons: [String: String]
     public let issues: [Issue]
 
     /// A plan with errors must not run.
@@ -118,19 +128,33 @@ public struct Planner: Sendable {
         var entries: [CopyPlan.Entry] = []
         var skipped: [SourceFile] = []
         var unrouted: [SourceFile] = []
+        var orphans: [SourceFile] = []
+        var reasons: [String: String] = [:]
         var issues: [CopyPlan.Issue] = []
         var undated = 0
 
         for (n, item) in ordered.enumerated() {
             let m = meta[item.id] ?? CaptureMetadata()
-            if m.captureDate == nil { undated += 1 }
+            if m.captureDate == nil && item.primary.kind != .sidecar { undated += 1 }
             let primaryRoute = compiled.first { $0.route.match.matches(item.primary, m) }
+            // Where each member of this item went, so a "NAME.EXT.xmp" sidecar can follow its file.
+            var placed: [String: (route: Workflow.Route, folder: [String], name: String)] = [:]
+            var owned: [SourceFile] = []
             for file in item.members {
+                if ItemGrouper.ownerFileName(ofSidecar: file) != nil { owned.append(file); continue }
                 // Sidecars travel with their primary unless a route names their kind explicitly.
                 let explicit = compiled.first { $0.route.match.kinds?.contains(file.kind) == true && $0.route.match.matches(file, m) }
                 let chosen = file.kind == .sidecar ? (explicit ?? primaryRoute) : compiled.first { $0.route.match.matches(file, m) }
-                guard let chosen else { unrouted.append(file); skipped.append(file); continue }
-                if chosen.route.skip { skipped.append(file); continue }
+                guard let chosen else {
+                    unrouted.append(file); skipped.append(file)
+                    reasons[file.relativePath] = "no route takes \(file.kind == .other ? "this kind of file" : file.kind.rawValue.uppercased() + " files")"
+                    continue
+                }
+                if chosen.route.skip {
+                    skipped.append(file)
+                    reasons[file.relativePath] = "the “\(chosen.route.name)” route says don't copy"
+                    continue
+                }
 
                 let context = Template.Context(file: file, meta: m, date: m.captureDate ?? file.modificationDate,
                                                sequence: workflow.sequenceStart + n, cardLabel: cardLabel,
@@ -152,6 +176,23 @@ public struct Planner: Sendable {
                 entries.append(CopyPlan.Entry(file: file, itemID: item.id, routeID: chosen.route.id,
                                               relativePath: (folder + [name]).joined(separator: "/"),
                                               destinationIDs: chosen.route.destinations, metadata: m))
+                placed[file.fileName.lowercased()] = (chosen.route, folder, name)
+            }
+            // "M10_1091.DNG.xmp" goes where M10_1091.DNG went, named after it: the copied DNG's new
+            // name plus ".xmp", so editing software still pairs them. No file, no sidecar.
+            for file in owned {
+                guard let owner = ItemGrouper.ownerFileName(ofSidecar: file),
+                      let target = placed[owner.lowercased()] else {
+                    orphans.append(file); skipped.append(file)
+                    let owner = ItemGrouper.ownerFileName(ofSidecar: file) ?? "its photo"
+                    reasons[file.relativePath] = item.members.contains { $0.fileName.caseInsensitiveCompare(owner) == .orderedSame }
+                        ? "its file \(owner) isn't copied" : "its file \(owner) isn't on the card"
+                    continue
+                }
+                let ext = file.url.pathExtension
+                entries.append(CopyPlan.Entry(file: file, itemID: item.id, routeID: target.route.id,
+                                              relativePath: (target.folder + ["\(target.name).\(ext)"]).joined(separator: "/"),
+                                              destinationIDs: target.route.destinations, metadata: m))
             }
         }
 
@@ -161,17 +202,22 @@ public struct Planner: Sendable {
         for e in entries { for d in e.destinationIDs { byPath["\(d)/\(e.relativePath.lowercased())", default: []].append(e) } }
         for (_, clash) in byPath.sorted(by: { $0.key < $1.key }) where clash.count > 1 {
             issues.append(.init(severity: .error, message: "\(clash.count) files would be named \(clash[0].relativePath): "
-                                + clash.map(\.file.relativePath).joined(separator: ", ") + ". Add {seq} or {orig} to the file name."))
+                                + clash.map(\.file.relativePath).joined(separator: ", ") + ". Add {seq} or {orig} to the file name.", topic: .nameClash))
         }
         if undated > 0 {
-            issues.append(.init(severity: .warning, message: "\(undated) item(s) have no capture date; their file dates were used"))
+            issues.append(.init(severity: .warning, message: "\(undated) item(s) have no capture date; their file dates were used", topic: .undated))
         }
         if workflow.timeZone == nil, entries.contains(where: { $0.metadata.captureDate != nil && !$0.metadata.captureDateHasOffset }) {
-            issues.append(.init(severity: .info, message: "capture times without a time-zone offset were read as \(zone.identifier) (the Mac's zone); set timeZone in the workflow to pin it"))
+            issues.append(.init(severity: .info, message: "capture times without a time-zone offset were read as \(zone.identifier) (the Mac's zone); set timeZone in the workflow to pin it", topic: .timeZone))
         }
         if !unrouted.isEmpty {
             issues.append(.init(severity: .warning, message: "\(unrouted.count) file(s) matched no route and won't be copied: "
-                                + unrouted.prefix(5).map(\.relativePath).joined(separator: ", ") + (unrouted.count > 5 ? " …" : "")))
+                                + unrouted.prefix(5).map(\.relativePath).joined(separator: ", ") + (unrouted.count > 5 ? " …" : ""),
+                                topic: .unrouted))
+        }
+        if !orphans.isEmpty {
+            // Left out on purpose: a sidecar named after a file that isn't being copied pairs with nothing.
+            issues.append(.init(severity: .info, message: "\(orphans.count) sidecar file(s) aren't copied because the file they belong to isn't on the card", topic: .orphanSidecars))
         }
         // Already copied earlier (re-inserted card, or an interrupted job): leave those out.
         // {seq} was numbered over every file first, so names stay stable across runs.
@@ -191,10 +237,12 @@ public struct Planner: Sendable {
         if !alreadyCopied.isEmpty {
             issues.append(.init(severity: .info, message: entries.isEmpty
                 ? "all \(alreadyCopied.count) files were already copied with this workflow and are still in place"
-                : "\(alreadyCopied.count) file(s) were already copied earlier and are still in place; only the \(entries.count) new file(s) will be copied"))
+                : "\(alreadyCopied.count) file(s) were already copied earlier and are still in place; only the \(entries.count) new file(s) will be copied",
+                topic: .alreadyCopied))
         } else if entries.isEmpty {
-            issues.append(.init(severity: .error, message: "nothing to copy"))
+            issues.append(.init(severity: .error, message: "nothing to copy", topic: .nothingToCopy))
         }
-        return CopyPlan(workflow: workflow, entries: entries, alreadyCopied: alreadyCopied, skipped: skipped, issues: issues)
+        return CopyPlan(workflow: workflow, entries: entries, alreadyCopied: alreadyCopied, skipped: skipped,
+                        notCopiedReasons: reasons, issues: issues)
     }
 }

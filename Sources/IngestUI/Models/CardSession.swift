@@ -33,6 +33,18 @@ public final class CardSession: Identifiable {
     public private(set) var autoRunNote: String?
     /// Inserted while the app was running (cards present at launch never auto-run).
     let insertedLive: Bool
+    /// Photos and videos outside DCIM, which aren't included (shown so nothing is silently missed).
+    public private(set) var outsideMedia = CardScanner.OutsideMedia()
+    /// Files outside DCIM (photos, videos, sidecars), offered folder by folder.
+    public private(set) var outsideFiles: [SourceFile] = []
+    /// Folders outside DCIM the user chose to include in this copy (not saved in the workflow).
+    public private(set) var includedOutsideFolders: Set<String> = []
+    /// Files the user unticked for this copy, by relative path. Survives a refresh.
+    public private(set) var excludedFiles: Set<String> = []
+    public private(set) var lastScanned: Date?
+    /// The card changed while a copy was running; rescan when it finishes.
+    public private(set) var changedDuringCopy = false
+    private var watchTask: Task<Void, Never>?
     /// The volume went away (ejected or pulled).
     public internal(set) var removed = false
 
@@ -69,17 +81,54 @@ public final class CardSession: Identifiable {
     }
 
     func scan() async {
+        await readCard()
+        await autoRunIfMatched()
+        if plan == nil { await replan() }
+        watchForChanges()
+    }
+
+    /// Re-reads the card (files added or removed in Finder, say) and replans. Never auto-runs.
+    public func refresh() async {
+        guard job?.isRunning != true else { changedDuringCopy = true; return }
+        changedDuringCopy = false
+        await readCard()
+        await replan()
+    }
+
+    private func readCard() async {
         scanning = true
+        scanError = nil
         let root = root
         do {
-            files = try await Task.detached { try CardScanner().scan(root) }.value
+            let (found, outside, outsideFound) = try await Task.detached {
+                (try CardScanner().scan(root), CardScanner().mediaOutsideRoots(root), CardScanner().scanOutsideRoots(root))
+            }.value
+            files = found
+            outsideMedia = outside
+            outsideFiles = outsideFound
         } catch {
             scanError = error.localizedDescription
         }
         scanning = false
+        lastScanned = .now
         bodySerials = await CameraDetector.bodySerials(in: files)
-        await autoRunIfMatched()
-        if plan == nil { await replan() }
+    }
+
+    /// Rescans by itself when the card's contents change.
+    private func watchForChanges() {
+        guard watchTask == nil else { return }
+        let root = root
+        watchTask = Task { [weak self] in
+            for await _ in FolderWatcher.changes(of: root) {
+                guard let self, !self.removed else { return }
+                await self.refresh()
+            }
+        }
+    }
+
+    func stopWatching() {
+        watchTask?.cancel()
+        watchTask = nil
     }
 
     /// Starts a workflow by itself if exactly one auto-run rule matches this card.
@@ -112,10 +161,38 @@ public final class CardSession: Identifiable {
         defer { planning = false }
         do {
             let planner = try Planner(workflow)
-            plan = await planner.plan(files, cardLabel: title, ledger: ledger)
+            plan = await planner.plan(filesToPlan, cardLabel: title, ledger: ledger)
         } catch {
             planError = "\(error)"
         }
+    }
+
+    /// What the plan is made from: DCIM files and the included outside folders, minus unticked files.
+    var filesToPlan: [SourceFile] {
+        let outside = outsideFiles.filter { includedOutsideFolders.contains(CardFileList.folderKey(of: $0)) }
+        return (files + outside).filter { !excludedFiles.contains($0.relativePath) }
+    }
+
+    /// Ticks or unticks one file for this copy.
+    public func setIncluded(_ included: Bool, file: SourceFile) {
+        if included { excludedFiles.remove(file.relativePath) } else { excludedFiles.insert(file.relativePath) }
+        Task { await replan() }
+    }
+
+    /// Ticks or unticks every file in a folder. For a folder outside DCIM this also opts it in or out.
+    public func setIncluded(_ included: Bool, folder: CardFileList.Folder) {
+        if folder.isOutsideDCIM {
+            if included { includedOutsideFolders.insert(folder.id) } else { includedOutsideFolders.remove(folder.id) }
+        }
+        for row in folder.rows {
+            if included { excludedFiles.remove(row.file.relativePath) } else if !folder.isOutsideDCIM { excludedFiles.insert(row.file.relativePath) }
+        }
+        Task { await replan() }
+    }
+
+    /// The card's files grouped for the list, with what will happen to each.
+    public var fileList: CardFileList {
+        CardFileList(files: files, outside: outsideFiles, plan: plan, excluded: excludedFiles, includedOutside: includedOutsideFolders)
     }
 
     public var canImport: Bool { plan?.canRun == true && job?.isRunning != true && !removed }
@@ -133,7 +210,7 @@ public final class CardSession: Identifiable {
             for await event in runner.run(progress.job) { progress.apply(event) }
             if Task.isCancelled { progress.markCancelled() }
             onJobFinished()
-            await replan()        // what's left to copy now (usually nothing)
+            if changedDuringCopy { await refresh() } else { await replan() }   // what's left to copy now
             await afterCopy(progress, after)
         }
     }

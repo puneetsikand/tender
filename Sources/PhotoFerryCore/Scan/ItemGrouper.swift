@@ -36,7 +36,21 @@ public struct ItemGrouper: Sendable {
         .sorted { $0.id < $1.id }
     }
 
+    /// For a sidecar named after a whole file name, `M10_1091.DNG.xmp` (Lightroom/ACR, RawTherapee,
+    /// DxO style), the file it belongs to: `M10_1091.DNG`. Nil for `M10_1091.xmp`.
+    public static func ownerFileName(ofSidecar file: SourceFile) -> String? {
+        guard file.kind == .sidecar else { return nil }
+        let inner = file.stem                                      // "M10_1091.DNG"
+        let innerExt = (inner as NSString).pathExtension
+        guard !innerExt.isEmpty else { return nil }
+        let kind = MediaKind(fileExtension: innerExt)
+        return kind == .other || kind == .sidecar ? nil : inner
+    }
+
     static func groupStem(for file: SourceFile) -> String {
+        if let owner = ownerFileName(ofSidecar: file) {
+            return (owner as NSString).deletingPathExtension.uppercased()
+        }
         let stem = file.stem.uppercased()
         if file.kind == .sidecar, file.url.pathExtension.lowercased() == "xml",
            let m = stem.wholeMatch(of: /(.+)M\d{2}/) {

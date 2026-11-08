@@ -29,6 +29,15 @@ struct CardDetailView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
+                    Task { await session.refresh() }
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(session.scanning || session.removed)
+                .help("Read the card again (it's also re-read automatically when its contents change)")
+
+                Button {
                     Task { await session.eject() }
                 } label: {
                     Label("Eject", systemImage: "eject")
@@ -65,25 +74,25 @@ struct CardDetailView: View {
             Button {
                 Task { await session.eject() }
             } label: {
-                Label("Eject", systemImage: "eject")
+                Label("Eject Card", systemImage: "eject").frame(minWidth: 110)
             }
-            .controlSize(.large)
+            .controlSize(.extraLarge)
             .disabled(session.job?.isRunning == true || session.removed)
             if session.job?.isRunning == true {
                 Button(role: .cancel) {
                     session.cancelImport()
                 } label: {
-                    Label("Cancel Copy", systemImage: "stop.fill").frame(minWidth: 140)
+                    Label("Cancel Copy", systemImage: "stop.fill").frame(minWidth: 180)
                 }
-                .controlSize(.large)
+                .controlSize(.extraLarge)
             } else {
                 Button {
                     session.startImport()
                 } label: {
-                    Label(copyTitle, systemImage: "doc.on.doc").frame(minWidth: 140)
+                    Label(copyTitle, systemImage: "doc.on.doc").font(.headline).frame(minWidth: 180)
                 }
                 .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+                .controlSize(.extraLarge)
                 .disabled(!session.canImport)
             }
         }
@@ -108,14 +117,26 @@ struct CardDetailView: View {
                 } else if let error = session.scanError {
                     Text(error).foregroundStyle(.red)
                 } else {
-                    Text("\(session.files.count) files · \(Fmt.bytes(session.totalBytes)) · \(session.volume.deviceProtocol ?? "")")
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Text("\(session.files.count) files · \(Fmt.bytes(session.totalBytes)) · \(session.volume.deviceProtocol ?? "")")
+                        if let t = session.lastScanned {
+                            Text("· read \(t.formatted(date: .omitted, time: .standard))")
+                        }
+                        Button { Task { await session.refresh() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                            .buttonStyle(.bordered).controlSize(.regular).disabled(session.scanning)
+                            .help("Read the card again (⌘R). It's also re-read by itself when its contents change.")
+                    }
+                    .foregroundStyle(.secondary)
                 }
                 if !session.cameras.isEmpty {
                     Text(session.cameras.joined(separator: ", ")).foregroundStyle(.secondary)
                 }
                 if let id = session.hardwareID {
                     Text("Card ID \(id.key)").font(.caption.monospaced()).foregroundStyle(.tertiary).textSelection(.enabled)
+                }
+                if session.changedDuringCopy {
+                    Label("The card changed during the copy; it will be re-read when the copy finishes.", systemImage: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(.secondary)
                 }
                 if let note = session.autoRunNote {
                     Label(note, systemImage: "bolt.slash").foregroundStyle(.secondary)
@@ -156,15 +177,12 @@ struct CardDetailView: View {
     }
 
     @ViewBuilder private var planArea: some View {
-        if session.scanning || session.planning {
+        if session.scanning && session.files.isEmpty {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let error = session.planError {
             ContentUnavailableView("Workflow problem", systemImage: "exclamationmark.triangle", description: Text(error))
-        } else if let plan = session.plan {
-            PlanPreview(plan: plan)
         } else {
-            ContentUnavailableView("Choose a workflow", systemImage: "arrow.triangle.branch",
-                                   description: Text("A workflow decides where each file goes and how it's named."))
+            CardFileListView(session: session)
         }
     }
 }

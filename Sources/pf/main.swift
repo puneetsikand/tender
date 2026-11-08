@@ -158,6 +158,11 @@ case "scan":
     }
     let total = files.reduce(Int64(0)) { $0 + $1.size }
     print("\(items.count) items, \(files.count) files, \(total.formatted(sizeFormat))")
+    let outside = CardScanner().mediaOutsideRoots(root)
+    if !outside.isEmpty {
+        print("note: \(outside.count) photo/video file(s) outside DCIM are not included: "
+              + outside.folders.map { $0.isEmpty ? "(card root)" : $0 }.joined(separator: ", "))
+    }
     for (body, n) in serials.sorted(by: { $0.value > $1.value }) { print("  camera \(body): \(n) items") }
 
 case "copy":
@@ -220,6 +225,11 @@ case "plan":
     for e in plan.alreadyCopied { print("\(e.file.relativePath)  →  (already copied to \(e.relativePath))") }
     for f in plan.skipped { print("\(f.relativePath)  →  (not copied)") }
     for issue in plan.issues { print(issue) }
+    let outside = CardScanner().mediaOutsideRoots(source.root)
+    if !outside.isEmpty {
+        print("note: \(outside.count) photo/video file(s) outside DCIM are not included: "
+              + outside.folders.map { $0.isEmpty ? "(card root)" : $0 }.joined(separator: ", "))
+    }
     print("\(plan.entries.count) files planned, \(plan.alreadyCopied.count) already copied, \(plan.skipped.count) not copied, source \(source.volumeLabel ?? source.root.path)"
           + (plan.canRun ? "" : plan.entries.isEmpty && !plan.alreadyCopied.isEmpty ? ". Nothing new to copy." : ". CANNOT RUN"))
     if !plan.canRun && plan.alreadyCopied.isEmpty { exit(1) }

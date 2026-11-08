@@ -50,6 +50,71 @@ public struct CardScanner: Sendable {
         return files.sorted { $0.relativePath < $1.relativePath }
     }
 
+    /// Photos and videos on the card *outside* the media roots, which `scan` deliberately leaves
+    /// out (cameras only write to DCIM; anything else was put there some other way). Reported so
+    /// the user knows they weren't included.
+    public struct OutsideMedia: Sendable, Hashable {
+        public var count = 0
+        /// Top-level folders holding them; "" = the card's root.
+        public var folders: [String] = []
+        public var isEmpty: Bool { count == 0 }
+        public init(count: Int = 0, folders: [String] = []) {
+            self.count = count
+            self.folders = folders
+        }
+    }
+
+    /// The photos, videos and their sidecars outside the media roots, as files that can be planned
+    /// if the user chooses to include them (hidden folders like the card's Trash are skipped).
+    public func scanOutsideRoots(_ root: URL, limit: Int = 20_000) -> [SourceFile] {
+        let root = root.standardizedFileURL
+        let resolved = resolveMediaRoots(in: root).map(\.standardizedFileURL.path)
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys,
+                                                         options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
+        var files: [SourceFile] = []
+        var seen = 0
+        for case let url as URL in walker {
+            seen += 1
+            if seen > limit { break }
+            if resolved.contains(url.standardizedFileURL.path) { walker.skipDescendants(); continue }
+            guard let v = try? url.resourceValues(forKeys: Set(keys)), v.isRegularFile == true,
+                  !url.lastPathComponent.hasPrefix("._") else { continue }
+            let kind = MediaKind(fileExtension: url.pathExtension)
+            guard kind != .other else { continue }
+            files.append(SourceFile(url: url, relativePath: Self.relativePath(of: url, under: root),
+                                    size: Int64(v.fileSize ?? 0), modificationDate: v.contentModificationDate, kind: kind))
+        }
+        return files.sorted { $0.relativePath < $1.relativePath }
+    }
+
+    public func mediaOutsideRoots(_ root: URL, limit: Int = 20_000) -> OutsideMedia {
+        let root = root.standardizedFileURL
+        let roots = Set(resolveMediaRoots(in: root).map(\.standardizedFileURL.path))
+        let dcim = resolveMediaRoots(in: root).first.map(\.standardizedFileURL.path)
+        var out = OutsideMedia()
+        var folders: [String: Int] = [:]
+        guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey],
+                                                         options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return out }
+        var seen = 0
+        for case let url as URL in walker {
+            seen += 1
+            if seen > limit { break }
+            let path = url.standardizedFileURL.path
+            if roots.contains(path) || path == dcim { walker.skipDescendants(); continue }
+            if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { continue }
+            if url.lastPathComponent.hasPrefix("._") { continue }
+            let kind = MediaKind(fileExtension: url.pathExtension)
+            guard kind != .other && kind != .sidecar else { continue }
+            out.count += 1
+            let rel = Self.relativePath(of: url, under: root)
+            let top = rel.contains("/") ? String(rel.split(separator: "/")[0]) : ""
+            folders[top, default: 0] += 1
+        }
+        out.folders = folders.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map(\.key)
+        return out
+    }
+
     /// Resolves each known media root against the real (case-varying) folder names on disk.
     func resolveMediaRoots(in root: URL) -> [URL] {
         Self.mediaRoots.compactMap { path in
