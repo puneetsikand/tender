@@ -33,25 +33,33 @@ public struct CopyPlan: Sendable {
     /// Planned files the ledger shows were already copied to every planned destination and are
     /// still there (`skipPreviouslyCopied`). Not part of the job.
     public let alreadyCopied: [Entry]
+    /// Of `alreadyCopied`, the files whose bucket uploads aren't done yet (relative paths).
+    public var pendingUploads: Set<String> = []
     /// Files no route took, or that a `skip` route deliberately left on the card.
     public let skipped: [SourceFile]
     /// Why each skipped file isn't copied, by relative path.
     public let notCopiedReasons: [String: String]
     public let issues: [Issue]
 
-    /// A plan with errors must not run.
-    public var canRun: Bool { !entries.isEmpty && !issues.contains { $0.severity == .error } }
+    /// A plan with errors must not run. With nothing to copy it can still run to queue uploads.
+    public var canRun: Bool { (!entries.isEmpty || !pendingUploads.isEmpty) && !issues.contains { $0.severity == .error } }
 
-    /// The job that executes this plan.
+    /// The job that executes this plan: local copies now, bucket uploads queued afterwards.
     public func job(source: JobSource) -> CopyJob {
-        let roots = Dictionary(uniqueKeysWithValues: workflow.destinations.map { ($0.id, $0.rootURL) })
-        let used = workflow.destinations.filter { d in entries.contains { $0.destinationIDs.contains(d.id) } }
-        let requests = entries.map { e in
+        let local = workflow.destinations.filter(\.isLocal)
+        let roots = Dictionary(uniqueKeysWithValues: local.map { ($0.id, $0.rootURL) })
+        let buckets = Dictionary(uniqueKeysWithValues: workflow.destinations.compactMap { d in d.s3.map { (d.id, $0) } })
+        let used = local.filter { d in entries.contains { $0.destinationIDs.contains(d.id) } }
+        func request(_ e: Entry) -> CopyRequest {
             CopyRequest(source: e.file, destinations: e.destinationIDs.compactMap { roots[$0]?.appending(path: e.relativePath) },
-                        metadata: e.metadata)
+                        metadata: e.metadata,
+                        remote: e.destinationIDs.compactMap { id in
+                            buckets[id].map { RemoteDestination(destinationID: id, target: $0, key: $0.key(for: e.relativePath)) }
+                        })
         }
-        return CopyJob(source: source, destinationRoots: used.map(\.rootURL), requests: requests,
-                       options: CopyOptions(verify: workflow.verify, onClash: workflow.onClash), workflowName: workflow.name)
+        return CopyJob(source: source, destinationRoots: used.map(\.rootURL), requests: entries.map(request),
+                       options: CopyOptions(verify: workflow.verify, onClash: workflow.onClash), workflowName: workflow.name,
+                       uploadOnly: alreadyCopied.filter { pendingUploads.contains($0.file.relativePath) }.map(request))
     }
 }
 
@@ -81,13 +89,25 @@ public struct Planner: Sendable {
         if w.destinations.isEmpty { problems.append("no destinations") }
         let ids = w.destinations.map(\.id)
         for dup in Set(ids.filter { id in ids.filter { $0 == id }.count > 1 }) { problems.append("destination id \"\(dup)\" is used twice") }
-        for d in w.destinations where d.root.trimmingCharacters(in: .whitespaces).isEmpty { problems.append("destination \"\(d.id)\" has no folder") }
+        for d in w.destinations {
+            if let t = d.s3 {
+                if t.host.trimmingCharacters(in: .whitespaces).isEmpty { problems.append("bucket destination \"\(d.id)\" has no endpoint") }
+                if t.bucket.trimmingCharacters(in: .whitespaces).isEmpty { problems.append("bucket destination \"\(d.id)\" has no bucket name") }
+                if t.keyID.trimmingCharacters(in: .whitespaces).isEmpty { problems.append("bucket destination \"\(d.id)\" has no key ID") }
+            } else if d.root.trimmingCharacters(in: .whitespaces).isEmpty {
+                problems.append("destination \"\(d.id)\" has no folder")
+            }
+        }
+        let bucketIDs = Set(w.destinations.filter { !$0.isLocal }.map(\.id))
         if w.routes.isEmpty { problems.append("no routes") }
         let routeIDs = w.routes.map(\.id)
         for dup in Set(routeIDs.filter { id in routeIDs.filter { $0 == id }.count > 1 }) { problems.append("route id \"\(dup)\" is used twice") }
         for r in w.routes {
             if !r.skip && r.destinations.isEmpty { problems.append("route \"\(r.id)\" has no destinations (set skip to leave files on the card)") }
             for d in r.destinations where !ids.contains(d) { problems.append("route \"\(r.id)\" sends files to unknown destination \"\(d)\"") }
+            if !r.skip, r.destinations.contains(where: bucketIDs.contains), r.destinations.allSatisfy(bucketIDs.contains) {
+                problems.append("route \"\(r.id)\" only uploads to a bucket; it also needs a folder, because uploads come from the verified local copy")
+            }
             for (label, text) in [("folder", r.folder), ("file name", r.fileName)] {
                 do { _ = try Template(text) } catch { problems.append("route \"\(r.id)\" \(label): \(error)") }
             }
@@ -223,7 +243,7 @@ public struct Planner: Sendable {
         // {seq} was numbered over every file first, so names stay stable across runs.
         var alreadyCopied: [CopyPlan.Entry] = []
         if workflow.skipPreviouslyCopied, let ledger, !entries.isEmpty {
-            let roots = Dictionary(uniqueKeysWithValues: workflow.destinations.map { ($0.id, $0.rootURL) })
+            let roots = Dictionary(uniqueKeysWithValues: workflow.destinations.filter(\.isLocal).map { ($0.id, $0.rootURL) })
             let checks = entries.flatMap { e in e.destinationIDs.compactMap { roots[$0] }.map { (e.file, $0.appending(path: e.relativePath)) } }
             if let done = try? ledger.previouslyCopied(checks) {
                 let (old, new) = entries.reduce(into: ([CopyPlan.Entry](), [CopyPlan.Entry]())) { acc, e in
@@ -234,6 +254,18 @@ public struct Planner: Sendable {
                 entries = new
             }
         }
+        // Already copied, but is the offsite copy done too?
+        var pendingUploads: Set<String> = []
+        let buckets = Dictionary(uniqueKeysWithValues: workflow.destinations.compactMap { d in d.s3.map { (d.id, $0) } })
+        if let ledger, !buckets.isEmpty {
+            for e in alreadyCopied {
+                let remotes = e.destinationIDs.compactMap { id in buckets[id].map { RemoteDestination(destinationID: id, target: $0, key: $0.key(for: e.relativePath)) } }
+                if remotes.contains(where: { (try? ledger.isUploaded($0, sha256: nil)) != true }) { pendingUploads.insert(e.file.relativePath) }
+            }
+        }
+        if !pendingUploads.isEmpty {
+            issues.append(.init(severity: .info, message: "\(pendingUploads.count) file(s) were copied earlier but aren't uploaded yet; running queues their uploads", topic: .alreadyCopied))
+        }
         if !alreadyCopied.isEmpty {
             issues.append(.init(severity: .info, message: entries.isEmpty
                 ? "all \(alreadyCopied.count) files were already copied with this workflow and are still in place"
@@ -242,7 +274,9 @@ public struct Planner: Sendable {
         } else if entries.isEmpty {
             issues.append(.init(severity: .error, message: "nothing to copy", topic: .nothingToCopy))
         }
-        return CopyPlan(workflow: workflow, entries: entries, alreadyCopied: alreadyCopied, skipped: skipped,
-                        notCopiedReasons: reasons, issues: issues)
+        var plan = CopyPlan(workflow: workflow, entries: entries, alreadyCopied: alreadyCopied, skipped: skipped,
+                            notCopiedReasons: reasons, issues: issues)
+        plan.pendingUploads = pendingUploads
+        return plan
     }
 }

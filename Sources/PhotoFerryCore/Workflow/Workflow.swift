@@ -5,9 +5,9 @@ import Foundation
 /// Stored as JSON (`*.pfflow`). Routes are tried in order and the first match takes the file.
 /// Sidecars (XMP, THM …) follow their item's primary file unless a route matches them explicitly.
 public struct Workflow: Sendable, Hashable, Codable {
-    /// v2 (2026-11-08) added onClash, skipPreviouslyCopied, afterCopy, autoRun. v1 files load
-    /// with those at their defaults.
-    public static let currentSchemaVersion = 2
+    /// v2 (2026-11-08) added onClash, skipPreviouslyCopied, afterCopy, autoRun. v3 (2026-11-08)
+    /// added S3 destinations (`Destination.s3`). Older files load with the new fields at defaults.
+    public static let currentSchemaVersion = 3
 
     public var schemaVersion: Int
     public var name: String
@@ -50,14 +50,20 @@ public struct Workflow: Sendable, Hashable, Codable {
         /// Short stable id routes refer to, e.g. "mac", "nas".
         public var id: String
         public var name: String
-        /// Folder path; `~` expands to the home folder.
+        /// Folder path; `~` expands to the home folder. Unused for S3 destinations.
         public var root: String
+        /// Set for a bucket destination; nil for a folder. Uploads to it run after the card job,
+        /// from the verified local copy, so routes that use it must also copy to a folder.
+        public var s3: S3Target?
 
-        public init(id: String, name: String, root: String) {
+        public init(id: String, name: String, root: String, s3: S3Target? = nil) {
             self.id = id
             self.name = name
             self.root = root
+            self.s3 = s3
         }
+
+        public var isLocal: Bool { s3 == nil }
 
         public var rootURL: URL {
             URL(fileURLWithPath: (root as NSString).expandingTildeInPath, isDirectory: true)

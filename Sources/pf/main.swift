@@ -25,6 +25,8 @@ usage: pf version
        pf s3 probe --endpoint <host> --bucket <b> --key-id <id> [--prefix p/] [--secret-stdin]
                                integrity experiment against an S3-compatible bucket (secret from the
                                Keychain, service local.photoferry.s3, or piped on stdin; never printed)
+       pf uploads [run [--secret-stdin] | retry | verify [--secret-stdin]]
+                               show the offsite upload queue / work through it here / requeue failed ones
        pf history [n]          recent jobs from the ledger (PF_LEDGER overrides its location)
        pf probe <mount>        dump DiskArbitration + IOKit details behind a volume (card ID experiment)
 """
@@ -271,6 +273,50 @@ case "s3":
     let s3 = S3Client(endpoint: S3Endpoint(host: host, bucket: bucket), keyID: keyID, secret: secret)
     print("endpoint \(host) region \(s3.endpoint.region) bucket \(bucket) prefix \(prefix)")
     await S3Probe.run(s3, prefix: prefix)
+
+case "uploads":
+    let ledger = try Ledger()
+    switch args.dropFirst().first {
+    case "run":
+        // One secret for every key ID when piped (dev); otherwise each key's secret from the Keychain.
+        let piped = args.contains("--secret-stdin") ? readLine(strippingNewline: true)?.trimmingCharacters(in: .whitespaces) : nil
+        let worker = UploadWorker(ledger: ledger, secret: { keyID in
+            if let piped, !piped.isEmpty { return piped }
+            return try S3Keychain.secret(forKeyID: keyID)
+        })
+        let clock = ContinuousClock()
+        let t0 = clock.now
+        let s = await worker.runUntilIdle()
+        let d = clock.now - t0
+        print("uploaded \(s.done), failed \(s.failed), will retry \(s.retried) in \(String(format: "%.1f", Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18)) s")
+    case "retry":
+        print("requeued \(try ledger.retryFailedUploads()) failed upload(s)")
+    case "verify":
+        // Independent check: download every finished upload and compare its SHA-256 with the card's.
+        let piped = args.contains("--secret-stdin") ? readLine(strippingNewline: true)?.trimmingCharacters(in: .whitespaces) : nil
+        var ok = 0, bad = 0
+        for u in try ledger.uploads(limit: 10_000) where u.state == .done {
+            let secret = try piped.flatMap { $0.isEmpty ? nil : $0 } ?? S3Keychain.secret(forKeyID: u.target.keyID)
+            let s3 = S3Client(endpoint: u.target.endpoint, keyID: u.target.keyID, secret: secret)
+            do {
+                let got = try await s3.downloadSHA256(u.key)
+                if got.sha256 == u.sha256 && got.size == u.size { ok += 1 } else { bad += 1; print("  MISMATCH \(u.key)") }
+            } catch { bad += 1; print("  could not download \(u.key): \(error)") }
+        }
+        print("downloaded and checked: \(ok) match the card hash, \(bad) don't")
+    case nil:
+        break
+    default:
+        fail(usage)
+    }
+    let counts = try ledger.uploadCounts()
+    print("queue: " + ["queued", "uploading", "done", "failed"].map { "\(counts[UploadRecord.State(rawValue: $0)!] ?? 0) \($0)" }.joined(separator: ", "))
+    for u in try ledger.uploads(limit: 30) {
+        let where_ = "\(u.target.bucket)/\(u.key)"
+        let size = u.size.formatted(sizeFormat)
+        print("  \(u.state.rawValue.padding(toLength: 9, withPad: " ", startingAt: 0)) \(size.padding(toLength: 9, withPad: " ", startingAt: 0)) \(where_)"
+              + (u.lastError.map { "  ← \($0)" } ?? "") + (u.attempts > 1 ? "  (attempt \(u.attempts))" : ""))
+    }
 
 case "history":
     let ledger = try Ledger()

@@ -38,6 +38,8 @@ public struct JobExecutor: Sendable {
                 for (root, file) in manifests.sorted(by: { $0.key.path < $1.key.path }) {
                     out.yield(.notice("manifest: \(file.path.dropFirst(root.path.count + 1)) in \(root.path)"))
                 }
+                let queued = enqueueUploads(job, summary)
+                if queued > 0 { out.yield(.notice("uploads: \(queued) queued for offsite backup")) }
                 out.yield(event)
             default:
                 out.yield(event)
@@ -46,5 +48,28 @@ public struct JobExecutor: Sendable {
         if !finished {
             try? ledger?.finishJob(job.id, status: .cancelled, summary: nil, manifests: [:])
         }
+    }
+
+    /// Queues bucket uploads for every file that now has a verified local copy: this job's files,
+    /// plus earlier copies that were never uploaded. Uploads read the local copy, never the card.
+    private func enqueueUploads(_ job: CopyJob, _ summary: CopySummary) -> Int {
+        guard let ledger else { return 0 }
+        var queued = 0
+        for r in summary.results where !r.request.remote.isEmpty {
+            guard let sha = r.sourceSHA256, let local = r.destinations.first(where: \.isSatisfied)?.url else { continue }
+            for remote in r.request.remote {
+                if (try? ledger.enqueueUpload(job: job.id, relativePath: r.request.source.relativePath, localPath: local.path,
+                                              sha256: sha, size: r.request.source.size, remote: remote)) == true { queued += 1 }
+            }
+        }
+        for req in job.uploadOnly {
+            guard let local = req.destinations.first(where: { FileManager.default.fileExists(atPath: $0.path) }),
+                  let sha = try? ledger.sha256(ofCopyAt: local.path) else { continue }
+            for remote in req.remote {
+                if (try? ledger.enqueueUpload(job: job.id, relativePath: req.source.relativePath, localPath: local.path,
+                                              sha256: sha, size: req.source.size, remote: remote)) == true { queued += 1 }
+            }
+        }
+        return queued
     }
 }

@@ -282,7 +282,7 @@ import Testing
         // Saving writes the new fields (and the app writes v2 for new workflows).
         let text = String(decoding: try WorkflowStore.encode(w), as: UTF8.self)
         #expect(text.contains("\"onClash\" : \"keepBoth\"") && text.contains("\"autoRun\""))
-        #expect(Workflow.starter().schemaVersion == 2)
+        #expect(Workflow.starter().schemaVersion == Workflow.currentSchemaVersion)
     }
 }
 

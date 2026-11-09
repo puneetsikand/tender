@@ -79,6 +79,38 @@ public final class Ledger: Sendable {
         m.registerMigration("v3: deleted from source") { db in
             try db.alter(table: "file") { t in t.add(column: "deletedFromSourceAt", .datetime) }
         }
+        m.registerMigration("v4: upload queue") { db in
+            try db.create(table: "upload") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("jobId", .text)
+                t.column("relativePath", .text).notNull()        // on the card
+                t.column("localPath", .text).notNull()           // the verified local copy it's read from
+                t.column("sha256", .text).notNull()              // the card hash; signed as the payload hash
+                t.column("size", .integer).notNull()
+                t.column("destinationId", .text).notNull()
+                t.column("host", .text).notNull()
+                t.column("bucket", .text).notNull()
+                t.column("objectKey", .text).notNull()
+                t.column("keyId", .text).notNull()
+                t.column("state", .text).notNull().indexed()     // queued | uploading | done | failed
+                t.column("attempts", .integer).notNull().defaults(to: 0)
+                t.column("notBefore", .datetime)                 // backoff: don't retry before this
+                t.column("lastError", .text)
+                t.column("multipartId", .text)
+                t.column("bytesDone", .integer).notNull().defaults(to: 0)
+                t.column("etag", .text)
+                t.column("versionId", .text)
+                t.column("createdAt", .datetime).notNull()
+                t.column("completedAt", .datetime)
+            }
+            try db.create(index: "upload_object", on: "upload", columns: ["host", "bucket", "objectKey"])
+            try db.create(table: "uploadPart") { t in
+                t.column("uploadId", .integer).notNull().references("upload", onDelete: .cascade)
+                t.column("partNumber", .integer).notNull()
+                t.column("etag", .text).notNull()
+                t.primaryKey(["uploadId", "partNumber"])
+            }
+        }
         return m
     }
 
@@ -160,6 +192,114 @@ public final class Ledger: Sendable {
                     try db.execute(sql: "UPDATE job SET status = 'interrupted' WHERE id = ?", arguments: [row["id"] as String])
                 }
             }
+        }
+    }
+
+    // MARK: Upload queue
+
+    /// Queues an upload unless the same object (endpoint, bucket, key) with the same content is
+    /// already queued, uploading or done. A failed one with the same content is queued again.
+    @discardableResult
+    public func enqueueUpload(job: UUID?, relativePath: String, localPath: String, sha256: String, size: Int64,
+                              remote: RemoteDestination, at date: Date = .now) throws -> Bool {
+        try pool.write { db in
+            let existing = try Row.fetchOne(db, sql: """
+                SELECT id, state FROM upload WHERE host = ? AND bucket = ? AND objectKey = ? AND sha256 = ?
+                ORDER BY id DESC LIMIT 1
+                """, arguments: [remote.target.host, remote.target.bucket, remote.key, sha256])
+            if let existing {
+                let state: String = existing["state"]
+                guard state == "failed" else { return false }
+                try db.execute(sql: "UPDATE upload SET state = 'queued', attempts = 0, notBefore = NULL, lastError = NULL, localPath = ? WHERE id = ?",
+                               arguments: [localPath, existing["id"] as Int64])
+                return true
+            }
+            try db.execute(sql: """
+                INSERT INTO upload (jobId, relativePath, localPath, sha256, size, destinationId, host, bucket, objectKey, keyId, state, createdAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)
+                """, arguments: [job?.uuidString, relativePath, localPath, sha256, size, remote.destinationID, remote.target.host,
+                                 remote.target.bucket, remote.key, remote.target.keyID, date])
+            return true
+        }
+    }
+
+    /// The next upload that may run now (queued or interrupted mid-upload, not backing off).
+    public func nextUpload(now: Date = .now, excluding busy: Set<Int64> = []) throws -> UploadRecord? {
+        try pool.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT * FROM upload WHERE state IN ('queued', 'uploading') AND (notBefore IS NULL OR notBefore <= ?)
+                ORDER BY id LIMIT 50
+                """, arguments: [now]).map(UploadRecord.init(row:)).first { !busy.contains($0.id) }
+        }
+    }
+
+    public func uploads(limit: Int = 500) throws -> [UploadRecord] {
+        try pool.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM upload ORDER BY id DESC LIMIT ?", arguments: [limit]).map(UploadRecord.init(row:))
+        }
+    }
+
+    public func uploadCounts() throws -> [UploadRecord.State: Int] {
+        try pool.read { db in
+            var out: [UploadRecord.State: Int] = [:]
+            for row in try Row.fetchAll(db, sql: "SELECT state, COUNT(*) AS n FROM upload GROUP BY state") {
+                if let s = UploadRecord.State(rawValue: row["state"]) { out[s] = row["n"] }
+            }
+            return out
+        }
+    }
+
+    func updateUpload(_ id: Int64, _ sql: String, _ args: StatementArguments) throws {
+        try pool.write { db in try db.execute(sql: "UPDATE upload SET \(sql) WHERE id = ?", arguments: args + [id]) }
+    }
+
+    func uploadParts(_ id: Int64) throws -> [Int: String] {
+        try pool.read { db in
+            Dictionary(uniqueKeysWithValues: try Row.fetchAll(db, sql: "SELECT partNumber, etag FROM uploadPart WHERE uploadId = ?",
+                                                              arguments: [id]).map { ($0["partNumber"] as Int, $0["etag"] as String) })
+        }
+    }
+
+    func recordUploadPart(_ id: Int64, number: Int, etag: String, bytesDone: Int64) throws {
+        try pool.write { db in
+            try db.execute(sql: "INSERT OR REPLACE INTO uploadPart (uploadId, partNumber, etag) VALUES (?, ?, ?)", arguments: [id, number, etag])
+            try db.execute(sql: "UPDATE upload SET bytesDone = ? WHERE id = ?", arguments: [bytesDone, id])
+        }
+    }
+
+    func clearUploadParts(_ id: Int64) throws {
+        try pool.write { db in
+            try db.execute(sql: "DELETE FROM uploadPart WHERE uploadId = ?", arguments: [id])
+            try db.execute(sql: "UPDATE upload SET multipartId = NULL, bytesDone = 0 WHERE id = ?", arguments: [id])
+        }
+    }
+
+    /// Whether this object is already uploaded (state done) with this content.
+    public func isUploaded(_ remote: RemoteDestination, sha256: String?) throws -> Bool {
+        try pool.read { db in
+            try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(SELECT 1 FROM upload WHERE host = ? AND bucket = ? AND objectKey = ? AND state = 'done'
+                              AND (? IS NULL OR sha256 = ?))
+                """, arguments: [remote.target.host, remote.target.bucket, remote.key, sha256, sha256]) ?? false
+        }
+    }
+
+    /// Puts failed uploads back in the queue (after fixing credentials, reconnecting a drive …).
+    @discardableResult
+    public func retryFailedUploads() throws -> Int {
+        try pool.write { db in
+            try db.execute(sql: "UPDATE upload SET state = 'queued', attempts = 0, notBefore = NULL WHERE state = 'failed'")
+            return db.changesCount
+        }
+    }
+
+    /// SHA-256 recorded for a verified copy at this path (for re-queueing uploads of earlier copies).
+    public func sha256(ofCopyAt path: String) throws -> String? {
+        try pool.read { db in
+            try String.fetchOne(db, sql: """
+                SELECT f.sha256 FROM copy c JOIN file f ON f.id = c.fileId
+                WHERE c.path = ? AND c.outcome IN ('written', 'present') AND f.sha256 IS NOT NULL ORDER BY c.id DESC LIMIT 1
+                """, arguments: [path])
         }
     }
 
@@ -249,3 +389,46 @@ public struct JobRecord: Sendable, Hashable {
         bytesRead = row["bytesRead"]
     }
 }
+
+/// One row of the upload queue.
+public struct UploadRecord: Sendable, Hashable, Identifiable {
+    public enum State: String, Sendable { case queued, uploading, done, failed }
+    public let id: Int64
+    public let relativePath: String
+    public let localPath: String
+    public let sha256: String
+    public let size: Int64
+    public let destinationID: String
+    public let target: S3Target
+    public let key: String
+    public let state: State
+    public let attempts: Int
+    public let notBefore: Date?
+    public let lastError: String?
+    public let multipartID: String?
+    public let bytesDone: Int64
+    public let etag: String?
+    public let versionID: String?
+    public let completedAt: Date?
+
+    init(row: Row) {
+        id = row["id"]
+        relativePath = row["relativePath"]
+        localPath = row["localPath"]
+        sha256 = row["sha256"]
+        size = row["size"]
+        destinationID = row["destinationId"]
+        target = S3Target(host: row["host"], bucket: row["bucket"], keyID: row["keyId"])
+        key = row["objectKey"]
+        state = State(rawValue: row["state"]) ?? .failed
+        attempts = row["attempts"]
+        notBefore = row["notBefore"]
+        lastError = row["lastError"]
+        multipartID = row["multipartId"]
+        bytesDone = row["bytesDone"]
+        etag = row["etag"]
+        versionID = row["versionId"]
+        completedAt = row["completedAt"]
+    }
+}
+

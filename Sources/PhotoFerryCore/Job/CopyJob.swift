@@ -11,11 +11,15 @@ public struct CopyJob: Sendable, Hashable, Codable, Identifiable {
     public let options: CopyOptions
     /// The workflow that planned this job; nil for ad-hoc `pf copy` jobs.
     public let workflowName: String?
+    /// Files already copied locally earlier (so not in `requests`) that still need uploading.
+    /// Their `destinations` are the existing local copies.
+    public let uploadOnly: [CopyRequest]
 
     public init(id: UUID = UUID(), source: JobSource, destinationRoots: [URL], requests: [CopyRequest],
-                options: CopyOptions, workflowName: String? = nil) {
+                options: CopyOptions, workflowName: String? = nil, uploadOnly: [CopyRequest] = []) {
         self.id = id
         self.workflowName = workflowName
+        self.uploadOnly = uploadOnly
         self.source = source
         self.destinationRoots = destinationRoots
         self.requests = requests

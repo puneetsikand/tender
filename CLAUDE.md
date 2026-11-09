@@ -44,7 +44,12 @@ scripts/package.sh               # dist/PhotoFerry.app
   auto-run never deletes.
 - Every write goes through `DestinationGuard` (pass `destinationRoots`): an unmounted drive or share must fail,
   never silently become a folder on the boot disk.
-- A copy never gets its final name before it has passed verification. Never report a verify read as `device` unless
+- A copy never gets its final name before it has passed verification.
+- Uploads read only a *verified local copy*, never the card; every upload is signed with the content's SHA-256 and a
+  multipart upload is completed only if the whole file hashes to the card hash. Never delete remote objects.
+- S3 secrets live only in the Keychain (service `local.photoferry.s3`, account = key ID). Never print them, never put them
+  in workflow JSON or logs. When inspecting the Keychain, show only whether an entry exists, never its fields.
+  For dev runs: `security find-generic-password -s local.photoferry.s3 -a <keyID> -w | pf uploads run --secret-stdin`. Never report a verify read as `device` unless
   `mincore` confirmed the pages were evicted.
 - Benchmarks after any `diff`/`cp` of the same source are invalid: the file cache serves the reads (it showed 2.4 GB/s
   from a UHS-I card). Use fresh data, or files larger than what was read recently.

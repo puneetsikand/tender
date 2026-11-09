@@ -7,11 +7,14 @@ public struct CopyRequest: Sendable, Hashable, Codable {
     public let destinations: [URL]
     /// Capture metadata the planner read, recorded in the ledger. Nil for ad-hoc copies.
     public let metadata: CaptureMetadata?
+    /// Buckets this file is uploaded to after it's verified locally.
+    public let remote: [RemoteDestination]
 
-    public init(source: SourceFile, destinations: [URL], metadata: CaptureMetadata? = nil) {
+    public init(source: SourceFile, destinations: [URL], metadata: CaptureMetadata? = nil, remote: [RemoteDestination] = []) {
         self.source = source
         self.destinations = destinations
         self.metadata = metadata
+        self.remote = remote
     }
 }
 

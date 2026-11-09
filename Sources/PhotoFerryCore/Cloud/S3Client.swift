@@ -151,6 +151,24 @@ public struct S3Client: Sendable {
                           etag: http.value(forHTTPHeaderField: "ETag")?.trimmingCharacters(in: CharacterSet(charactersIn: "\"")))
     }
 
+    /// Downloads an object to a temporary file and returns its SHA-256 and size (for verification
+    /// and, later, restores). Streams to disk, so object size doesn't matter.
+    public func downloadSHA256(_ key: String) async throws -> (sha256: String, size: Int64) {
+        var r = URLRequest(url: endpoint.url(for: key))
+        r.httpMethod = "GET"
+        signer.sign(&r, payloadSHA256: SigV4.emptyPayloadHash)
+        let (file, resp) = try await session.download(for: r)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let http = resp as! HTTPURLResponse
+        guard (200..<300).contains(http.statusCode) else { throw S3Error(status: http.statusCode, body: (try? Data(contentsOf: file)) ?? Data()) }
+        let h = try FileHandle(forReadingFrom: file)
+        defer { try? h.close() }
+        var hasher = SHA256()
+        var size: Int64 = 0
+        while let chunk = try h.read(upToCount: 8 << 20), !chunk.isEmpty { hasher.update(data: chunk); size += Int64(chunk.count) }
+        return (SigV4.hex(hasher.finalize()), size)
+    }
+
     /// Bucket names this key can see (bucket-restricted B2 keys see just their bucket).
     public func listBuckets() async throws -> [String] {
         var c = URLComponents(); c.scheme = "https"; c.host = endpoint.host; c.path = "/"
@@ -208,7 +226,11 @@ public struct S3Client: Sendable {
         guard (200..<300).contains(http.statusCode), !String(decoding: data, as: UTF8.self).contains("<Error>") else {
             throw S3Error(status: http.statusCode, body: data)
         }
-        return PutResult(etag: http.value(forHTTPHeaderField: "ETag")?.trimmingCharacters(in: CharacterSet(charactersIn: "\"")),
+        // B2 puts the completed object's ETag in the XML body, not a header.
+        let text = String(decoding: data, as: UTF8.self)
+        let bodyETag = text.range(of: "<ETag>").flatMap { a in text.range(of: "</ETag>").map { String(text[a.upperBound..<$0.lowerBound]) } }
+        let etag = (http.value(forHTTPHeaderField: "ETag") ?? bodyETag?.replacingOccurrences(of: "&quot;", with: ""))
+        return PutResult(etag: etag?.trimmingCharacters(in: CharacterSet(charactersIn: "\"")),
                          versionID: http.value(forHTTPHeaderField: "x-amz-version-id"))
     }
 

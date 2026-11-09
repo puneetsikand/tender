@@ -33,12 +33,14 @@ public enum CopyService {
 public final class CopyServicePeer: XPCPeerHandler {
     let session: XPCSession
     let ledger: Ledger?
+    let uploads: UploadWorker?
     let jobs = Mutex<[UUID: Task<Void, Never>]>([:])
     static let log = Logger(subsystem: CopyService.name, category: "service")
 
-    public init(session: XPCSession, ledger: Ledger?) {
+    public init(session: XPCSession, ledger: Ledger?, uploads: UploadWorker? = nil) {
         self.session = session
         self.ledger = ledger
+        self.uploads = uploads
     }
 
     public func handleIncomingRequest(_ request: CopyService.Request) -> (any Encodable)? {
@@ -58,6 +60,8 @@ public final class CopyServicePeer: XPCPeerHandler {
                 }
                 self.jobs.withLock { $0[job] = nil }
                 xpc_transaction_end()
+                // Start any uploads the job queued now, rather than at the next poll.
+                if let uploads = self.uploads { Task { _ = await uploads.runUntilIdle() } }
             }
             jobs.withLock { $0[job] = task }
             return CopyService.Reply.accepted
